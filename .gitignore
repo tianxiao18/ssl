@@ -1,0 +1,19 @@
+# data and results
+data
+outputs/
+
+# Python
+__pycache__/
+*.py[cod]
+*.so
+
+# virtual environment
+venv/
+
+# Jupyter
+.ipynb_checkpoints/
+
+# editors / OS
+.DS_Store
+
+.claude
