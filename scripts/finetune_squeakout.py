@@ -1,8 +1,7 @@
 """
 Fine-tune a pretrained SqueakOut checkpoint on ground-truth segmentation masks,
 then run inference on a recording and write COCO JSONs (same format as
-run_squeakout_raw.py) so the output can be fed directly to
-combine_spectrogram_views.py.
+run_squeakout.py) so the output can be fed directly to evaluate.py.
 
 Loss: α·FocalLoss + (1-α)·DiceLoss  (α=0.3, γ=2)
 Augmentations (per-batch, independent probabilities):
@@ -50,7 +49,7 @@ from squeakout import load_model, resolve_device
 from squeakout.data import DEFAULT_IMAGE_SIZE, load_spectrogram_tensor
 from squeakout.inference import DEFAULT_MASK_THRESHOLD, logits_to_mask
 
-# ── Constants (shared with run_squeakout_raw.py) ─────────────────────────────
+# ── Constants ────────────────────────────────────────────────────────────────
 
 SPEC_LO, SPEC_HI = -70, 0
 NPERSEG, NOVERLAP = 512, 256
@@ -257,7 +256,7 @@ class CocoSegDataset(Dataset):
                 torch.from_numpy(mask_np).unsqueeze(0))
 
 
-# ── Inference helpers (shared with run_squeakout_raw.py) ─────────────────────
+# ── Inference helpers ────────────────────────────────────────────────────────
 
 def write_spectrogram_img(audio, sr, path):
     _, _, Pxx = scipy_spectrogram(audio, fs=sr, nperseg=NPERSEG, noverlap=NOVERLAP)
