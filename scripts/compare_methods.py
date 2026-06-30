@@ -31,6 +31,9 @@ def load_metrics(path):
                 "channel":  row["channel"],
                 "n_gt":     int(row["n_gt"]),
                 "tp":       int(row["tp"]),
+                # pred_tp = predictions overlapping >=1 GT (precision numerator);
+                # falls back to tp for older metrics.csv without the column.
+                "pred_tp":  int(row.get("pred_tp", row["tp"])),
                 "fp":       int(row["fp"]),
                 "fn":       int(row["fn"]),
             })
@@ -38,11 +41,12 @@ def load_metrics(path):
 
 
 def micro_stats(rows):
-    tp = sum(r["tp"] for r in rows)
+    tp      = sum(r["tp"] for r in rows)        # GT events detected (recall)
+    pred_tp = sum(r["pred_tp"] for r in rows)   # correct predictions (precision)
     fp = sum(r["fp"] for r in rows)
     fn = sum(r["fn"] for r in rows)
     rec  = tp / (tp + fn) if (tp + fn) > 0 else float("nan")
-    prec = tp / (tp + fp) if (tp + fp) > 0 else float("nan")
+    prec = pred_tp / (pred_tp + fp) if (pred_tp + fp) > 0 else float("nan")
     f1   = 2 * prec * rec / (prec + rec) if (prec + rec) > 0 else float("nan")
     return rec, prec, f1
 
@@ -79,15 +83,12 @@ method_names = list(data.keys())
 n_methods = len(method_names)
 
 # ── layout ────────────────────────────────────────────────────────────────────
-# Row 0: grouped bar — overall + per channel (Recall / Precision / F1)
-# Row 1: per-session F1 scatter (one panel per channel)
+# Single row: grouped bar — overall + per channel (Recall / Precision / F1)
 
 n_groups  = 1 + len(channels)   # overall + each channel
-n_sess_panels = len(channels)
 
-fig = plt.figure(figsize=(14, 9))
-gs  = fig.add_gridspec(2, max(n_groups, n_sess_panels),
-                        height_ratios=[1.4, 1], hspace=0.45, wspace=0.35)
+fig = plt.figure(figsize=(14, 5))
+gs  = fig.add_gridspec(1, n_groups, wspace=0.35)
 
 colors = plt.cm.tab10(np.linspace(0, 0.3, n_methods))
 metric_labels = ["Recall", "Precision", "F1"]
@@ -130,30 +131,6 @@ for ci, ch in enumerate(channels):
     ch_data = {m: [r for r in rows if r["channel"] == ch]
                for m, rows in data.items()}
     bar_panel(ax, ch_data, f"Channel {ch}")
-
-# ── Row 1: per-session F1 scatter ─────────────────────────────────────────────
-
-for ci, ch in enumerate(channels):
-    ax = fig.add_subplot(gs[1, ci])
-    for k, (method, rows) in enumerate(data.items()):
-        f1s = []
-        for sess in sessions:
-            sess_rows = [r for r in rows if r["session"] == sess and r["channel"] == ch]
-            _, _, f1 = micro_stats(sess_rows)
-            f1s.append(f1)
-        xs = np.arange(len(sessions)) + offsets[k] * 0.5
-        ax.scatter(xs, f1s, color=colors[k], label=method, s=40, zorder=3)
-        ax.plot(xs, f1s, color=colors[k], alpha=0.4, linewidth=1)
-
-    ax.set_xticks(np.arange(len(sessions)))
-    ax.set_xticklabels([s.split("/")[-1] for s in sessions],
-                       rotation=45, ha="right", fontsize=7)
-    ax.set_ylim(0, 1.05)
-    ax.set_title(f"Per-session F1 — ch {ch}", fontsize=10)
-    ax.set_ylabel("F1")
-    ax.legend(fontsize=8)
-    ax.grid(alpha=0.3)
-    despine(ax)
 
 out_path = Path(args.out)
 out_path.parent.mkdir(parents=True, exist_ok=True)

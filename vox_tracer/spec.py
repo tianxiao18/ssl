@@ -13,7 +13,6 @@ SPEC_LO, SPEC_HI = -70, 0
 NPERSEG, NOVERLAP = 512, 256
 SYNC_PAD = 0.05  # seconds of padding added around each DAS event (split before/after)
 
-
 def write_spectrogram_img(audio, sr, path, lo=SPEC_LO, hi=SPEC_HI):
     """Save raw audio as a normalised dB spectrogram PNG; return (h, w)."""
     _, _, Pxx = spectrogram(audio, fs=sr, nperseg=NPERSEG, noverlap=NOVERLAP)

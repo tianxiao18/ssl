@@ -17,8 +17,8 @@ Examples
 --------
 # single recording
 python scripts/run.py sam3 \
-    outputs/spectrograms/experiment_439/idx_000 \
-    outputs/sam3/experiment_439/idx_000 \
+    outputs/spectrograms/experiment_445/idx_011 \
+    outputs/sam3/experiment_445/idx_011 \
     --sam3-checkpoint sam3/sam3.pt
 
 # all recordings in parallel
@@ -98,9 +98,19 @@ p_sam3.add_argument("--sam3-checkpoint", default=None)
 p_sam3.add_argument("--sigmas",          default="2,3,4")
 p_sam3.add_argument("--threshold-pct",   type=float, default=99.0)
 p_sam3.add_argument("--score-threshold", type=float, default=0.5)
-p_sam3.add_argument("--sample-rate",     type=int,   default=125000)
-p_sam3.add_argument("--freq-min",        type=float, default=20000.0)
-p_sam3.add_argument("--overwrite",       action="store_true",
+p_sam3.add_argument("--sample-rate",          type=int,   default=125000)
+p_sam3.add_argument("--freq-min",             type=float, default=20000.0)
+# stage 1: ridge-filter candidate component filters
+p_sam3.add_argument("--min-area",             type=int,   default=30)
+p_sam3.add_argument("--vert-aspect",          type=float, default=5.0)
+p_sam3.add_argument("--horiz-aspect",         type=float, default=0.2)
+p_sam3.add_argument("--close-kernel",         default="7,3", help="morph-close kernel 'w,h'")
+# stage 2: SAM3 post-hoc mask filters
+p_sam3.add_argument("--max-mask-area-frac",   type=float, default=0.15)
+p_sam3.add_argument("--min-freq-sweep-frac",  type=float, default=0.04)
+p_sam3.add_argument("--min-mask-cols",        type=int,   default=5,
+                    help="reject SAM3 masks spanning fewer than this many time columns")
+p_sam3.add_argument("--overwrite",            action="store_true",
                     help="reprocess channels that already have output")
 
 # --- das_yolo ---
@@ -132,6 +142,12 @@ elif args.model == "sam3":
               sigmas=[float(s) for s in args.sigmas.split(",")],
               threshold_pct=args.threshold_pct, score_threshold=args.score_threshold,
               sample_rate=args.sample_rate, freq_min=args.freq_min,
+              min_area=args.min_area, vert_aspect=args.vert_aspect,
+              horiz_aspect=args.horiz_aspect,
+              close_kernel=tuple(int(s) for s in args.close_kernel.split(",")),
+              max_mask_area_frac=args.max_mask_area_frac,
+              min_freq_sweep_frac=args.min_freq_sweep_frac,
+              min_mask_cols=args.min_mask_cols,
               overwrite=args.overwrite)
 elif args.model == "das_yolo":
     kw = dict(channels=channels, chunk_sec=args.chunk_sec)

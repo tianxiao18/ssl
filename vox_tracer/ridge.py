@@ -52,6 +52,7 @@ def compute_seg_mask(
     min_area=30,
     vert_aspect=5.0,
     horiz_aspect=0.2,
+    close_kernel=(7, 3),
 ):
     """Threshold a filter response into a clean binary segmentation mask.
 
@@ -64,7 +65,7 @@ def compute_seg_mask(
     thresh   = np.percentile(response, threshold_pct)
     binary   = (response >= thresh).astype(np.uint8) * 255
     filtered = _filter_components(binary, min_area, vert_aspect, horiz_aspect, freq_cutoff_row)
-    kernel   = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (7, 3))
+    kernel   = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, tuple(close_kernel))
     closed   = cv2.morphologyEx(filtered, cv2.MORPH_CLOSE, kernel)
     return _filter_components(closed, min_area, vert_aspect, horiz_aspect, freq_cutoff_row)
 
