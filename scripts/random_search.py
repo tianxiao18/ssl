@@ -86,7 +86,7 @@ STAGE1_SPACE = {
 # scoring <= SCORE_THR_MIN are dropped by every sample anyway (see sam3_preds_scored),
 # so this is exact — it just avoids caching ~200 full-res masks per window.
 # KEEP THIS EQUAL TO the lower bound of score_threshold below.
-SCORE_THR_MIN = 0.4
+SCORE_THR_MIN = 0.2
 STAGE2_SPACE = {
     "min_freq_sweep_frac": lambda r: round(r.uniform(0.03, 0.10), 3),
     "min_mask_cols":       lambda r: r.randint(1, 12),

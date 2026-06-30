@@ -10,13 +10,6 @@ from vox_tracer.ridge import compute_seg_mask
 from vox_tracer.spec import group_specs_by_channel
 
 
-# Cache of (gray, sato_response) keyed by (image_path, sigmas). The sato ridge
-# filter is the dominant CPU cost (~87% of per-image pre-work) and depends only
-# on the image + sigmas — not on any searched stage-1/stage-2 param. A sweep that
-# holds sigmas fixed would otherwise recompute it identically once per trial, so
-# memoizing it collapses ~60 recomputes per image down to one. Keyed by sigmas
-# too, so a sweep that varies sigmas stays correct. Process-lifetime; for the
-# random search (~9.5k images) the cached float64 responses are a few GB.
 _SATO_CACHE = {}
 
 
