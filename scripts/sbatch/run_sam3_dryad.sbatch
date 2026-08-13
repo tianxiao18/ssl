@@ -15,8 +15,7 @@
 # Submit:  sbatch scripts/run_sam3_dryad.sbatch
 
 SPEC_ROOT="outputs/spectrograms/dryad_gerbil"
-OUT_ROOT="outputs/sam3/dryad_gerbil"
-DATA_ROOT="data/dryad_gerbil"
+OUT_ROOT="outputs/sam3"
 CHECKPOINT="sam3/sam3.pt"        # leave empty to download from HuggingFace
 
 LOGDIR="/mnt/home/the10/ssl/logs"
@@ -31,16 +30,16 @@ source venv/bin/activate
 # otherwise filter out real dryad calls.
 for rec_dir in "$SPEC_ROOT"/*/; do
     stem="$(basename "$rec_dir")"
-    out="$OUT_ROOT/$stem/coco_ch_0.json"
+    out="$OUT_ROOT/dryad_gerbil/$stem/coco_ch_0.json"
     if [ -f "$out" ]; then
         echo "skip $stem (already done)"
         continue
     fi
     python scripts/run.py sam3 \
-        "$rec_dir" \
-        "$OUT_ROOT/$stem" \
+        "$OUT_ROOT" \
+        --dataset dryad_gerbil \
+        --recording "$stem" \
         --channels 0 --prefix mic \
-        --recording-dir "$DATA_ROOT/$stem" \
         --freq-min 500 --min-centroid-hz 0 \
         ${CHECKPOINT:+--sam3-checkpoint "$CHECKPOINT"}
 done

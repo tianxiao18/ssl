@@ -8,7 +8,6 @@
 #SBATCH --time=24:00:00
 #SBATCH --output=/tmp/%x-%j.out
 
-SPEC_BASE="outputs/spectrograms/gerbil_ssl"
 OUT_BASE="outputs/squeakout"
 CHECKPOINT=""                   # leave empty to use squeakout/squeakout_weights.ckpt
 OVERWRITE="--overwrite"         # set to "--overwrite" to reprocess existing outputs
@@ -27,8 +26,8 @@ cd /mnt/home/the10/ssl
 source venv/bin/activate
 
 python scripts/run.py squeakout \
-    "$SPEC_BASE" \
     "$OUT_BASE" \
+    --dataset gerbil_ssl \
     --all \
     --workers 1 \
     ${CHECKPOINT:+--checkpoint "$CHECKPOINT"} \

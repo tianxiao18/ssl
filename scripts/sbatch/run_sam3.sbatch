@@ -8,7 +8,6 @@
 #SBATCH --time=24:00:00
 #SBATCH --output=/tmp/%x-%j.out
 
-SPEC_BASE="outputs/spectrograms/gerbil_ssl"
 OUT_BASE="outputs/sam3"
 CHECKPOINT="sam3/sam3.pt"        # leave empty to download from HuggingFace
 OVERWRITE="--overwrite"         # set to "--overwrite" to reprocess existing outputs
@@ -21,8 +20,8 @@ cd /mnt/home/the10/ssl
 source venv/bin/activate
 
 python scripts/run.py sam3 \
-    "$SPEC_BASE" \
     "$OUT_BASE" \
+    --dataset gerbil_ssl \
     --all \
     --workers 1 \
     ${CHECKPOINT:+--sam3-checkpoint "$CHECKPOINT"} \

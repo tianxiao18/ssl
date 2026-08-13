@@ -1,20 +1,18 @@
 """
 Generate spectrogram PNGs from raw audio recordings (step 1).
 
-Run this before any of the model scripts. Spectrograms are written to spec_dir
-and reused by all downstream runners.
+Run this before any of the model scripts. recording_dir is always
+data/<dataset>[/<recording>] and spec_dir is always
+outputs/spectrograms/<dataset>[/<recording>] -- --dataset is required.
 
 Single recording:
-    python scripts/gen_spectrograms.py <recording_dir> <spec_dir> [--channels 118,35]
+    python scripts/gen_spectrograms.py --dataset <dataset> --recording <exp>/<idx> [--channels 118,35]
 
-All recordings under a data root (parallel):
-    python scripts/gen_spectrograms.py <data_root> <out_base> --all [--workers 8]
+All recordings in the dataset (parallel):
+    python scripts/gen_spectrograms.py --dataset <dataset> --all [--workers 8]
 
 Example:
-    python scripts/gen_spectrograms.py \\
-        /mnt/home/the10/ssl/data/gerbil_ssl \\
-        /mnt/home/the10/ssl/outputs/spectrograms/gerbil_ssl \\
-        --all --workers 8
+    python scripts/gen_spectrograms.py --dataset gerbil_ssl --all --workers 8
 
 Per-dataset dB calibration
 ---------------------------
@@ -68,9 +66,13 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 from vox_tracer.spec import calibrate_db_range, load_channel_audio, write_chunk_spectrograms
 
+DATASETS = ("gerbil_ssl", "dryad_gerbil", "gerbil_family")
+
 parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
-parser.add_argument("recording_dir", help="single recording dir, or data root when --all is set")
-parser.add_argument("spec_dir",      help="output spectrogram dir, or output base when --all is set")
+parser.add_argument("--dataset", required=True, choices=DATASETS)
+parser.add_argument("--recording", default=None,
+                    help="single experiment_X/idx_Y to process (omit and pass --all instead "
+                         "to process every recording in the dataset)")
 parser.add_argument("--channels",    default="118,35")
 parser.add_argument("--prefix",      default="headmic",
                     help="recording-stream filename prefix, matching '{prefix}_{ch}_*.wav' audio "
@@ -97,12 +99,17 @@ args = parser.parse_args()
 
 channels = [int(c) for c in args.channels.split(",")]
 
+recording_base = Path("data") / args.dataset
+spec_base      = Path("outputs") / "spectrograms" / args.dataset
+
 if args.source_wav is not None:
     if args.all:
         parser.error("--source-wav is only valid without --all (one recording at a time)")
+    if not args.recording:
+        parser.error("--source-wav requires --recording <exp>/<idx>")
     if len(channels) != 1:
         parser.error("--source-wav requires exactly one --channels value")
-    rec_dir = Path(args.recording_dir)
+    rec_dir = recording_base / args.recording
     rec_dir.mkdir(parents=True, exist_ok=True)
     link = rec_dir / f"{args.prefix}_{channels[0]}_{args.source_wav.stem}.wav"
     if not link.exists():
@@ -134,19 +141,16 @@ def _process_one(recording_dir, spec_dir, channels, chunk_sec, prefix, calibrate
     return total
 
 
-if not args.all:
-    _process_one(args.recording_dir, args.spec_dir, channels, args.chunk_sec,
-                 args.prefix, args.calibrate, args.lo, args.hi)
-else:
-    data_root = Path(args.recording_dir)
-    out_base  = Path(args.spec_dir)
-
+if args.recording:
+    _process_one(recording_base / args.recording, spec_base / args.recording, channels,
+                 args.chunk_sec, args.prefix, args.calibrate, args.lo, args.hi)
+elif args.all:
     def _out_dir(idx_dir):
-        return out_base / idx_dir.parent.name / idx_dir.name
+        return spec_base / idx_dir.parent.name / idx_dir.name
 
     recordings = [
         (idx_dir, _out_dir(idx_dir))
-        for exp_dir in sorted(data_root.glob("experiment_*"))
+        for exp_dir in sorted(recording_base.glob("experiment_*"))
         for idx_dir in sorted(exp_dir.glob("idx_*"))
     ]
     print(f"Found {len(recordings)} recordings, running with {args.workers} workers …")
@@ -167,3 +171,5 @@ else:
                 failed += 1
 
     print(f"\nDone: {done} succeeded, {failed} failed.")
+else:
+    parser.error("either --recording <exp>/<idx> or --all is required")

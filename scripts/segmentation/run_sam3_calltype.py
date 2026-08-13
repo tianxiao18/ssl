@@ -3,9 +3,9 @@ of the single loudest one.
 
 vox_tracer/sam3_runner.py's iter_sam3_windows prompts SAM3 with exactly one
 ridge candidate per window -- whichever connected component scored highest on
-raw ridge brightness (mean_ridge_intensity * (1 - extent)). Evaluating the
-dryad smoke test (outputs/sam3/dryad_gerbil_smoketest) against ground truth
-showed this is the main recall bottleneck: windows with >1 real call often lose
+raw ridge brightness (mean_ridge_intensity * (1 - extent)). Evaluating an early
+dryad smoke test against ground truth showed this is the main recall bottleneck:
+windows with >1 real call often lose
 the quieter ones to a single loud broadband noise streak that outscores them.
 
 This script is standalone rather than a change to sam3_runner.py -- it's
@@ -32,8 +32,8 @@ call shapes, not just one -- the two failure modes raised when reviewing the
 smoke test.
 
     python scripts/segmentation/run_sam3_calltype.py \\
-        outputs/spectrograms/dryad_gerbil_smoketest/2020_07_22_15_52_33_369348_merged \\
-        outputs/sam3_calltype/dryad_gerbil_smoketest/2020_07_22_15_52_33_369348_merged \\
+        outputs/spectrograms/dryad_gerbil/2020_07_22_15_52_33_369348_merged \\
+        outputs/sam3_calltype/dryad_gerbil/2020_07_22_15_52_33_369348_merged \\
         --recording-dir data/dryad_gerbil/2020_07_22_15_52_33_369348_merged \\
         --call-type-specs outputs/dryad_holdout \\
         --call-type-checkpoint /mnt/home/the10/ceph/dataset/dryad_gerbil/checkpoint_050.tar \\

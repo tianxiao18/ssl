@@ -18,7 +18,6 @@
 #
 # Submit:  sbatch scripts/run_pr_sweeps.sbatch
 
-SPEC_BASE="outputs/spectrograms/gerbil_ssl"
 CHECKPOINT="sam3/sam3.pt"                 # leave empty to download from HuggingFace
 GT_CSV="data/gerbil_ssl/sampled_contiguous_detections.csv"
 
@@ -36,12 +35,14 @@ cd /mnt/home/the10/ssl
 source venv/bin/activate
 
 # echo "=== squeakout (GPU, mask_threshold=${SQUEAKOUT_MASK_THRESHOLD}) → outputs/squeakout_pr ==="
-python scripts/run.py squeakout "$SPEC_BASE" outputs/squeakout_pr \
+python scripts/run.py squeakout outputs/squeakout_pr \
+    --dataset gerbil_ssl \
     --all --workers 1 \
     --mask-threshold "$SQUEAKOUT_MASK_THRESHOLD"
 
 # echo "=== sam3 (GPU, score_threshold=${SAM3_SCORE_THRESHOLD}) → outputs/sam3_pr ==="
-# python scripts/run.py sam3 "$SPEC_BASE" outputs/sam3_pr \
+# python scripts/run.py sam3 outputs/sam3_pr \
+#     --dataset gerbil_ssl \
 #     --all --workers 1 \
 #     ${CHECKPOINT:+--sam3-checkpoint "$CHECKPOINT"} \
 #     --score-threshold "$SAM3_SCORE_THRESHOLD" \

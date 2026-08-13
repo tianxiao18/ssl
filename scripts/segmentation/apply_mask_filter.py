@@ -12,12 +12,13 @@ filtered to match a fair comparison without a GPU re-run.
 Only the mask geometry matters, so this reproduces exactly what the runner would
 have emitted whenever each component maps to a single polygon (the usual case).
 
---max-flatness adds the spectral flatness gate on top, still without a GPU
-re-run: it re-derives each detection's band-limited flatness from the bbox
-already stored in the annotation (same math as sam3_runner/ridge's
-detection_spectral_features) plus the ORIGINAL audio, and drops anything too
-noise-like (flat) to be a real call. This is the fix for the SAM3 dryad runs,
-which never had a flatness gate wired in (see vox_tracer.ridge.detection_band_features):
+--max-flatness / --min-centroid-hz add the spectral flatness / centroid gates on
+top, still without a GPU re-run: they re-derive each detection's band-limited
+flatness/centroid from the bbox already stored in the annotation (same math as
+sam3_runner/ridge's detection_spectral_features) plus the ORIGINAL audio, and
+drop anything too noise-like (flat) or too low-pitched to be a real call. This is
+the fix for the SAM3 dryad runs, which never had a flatness gate wired in (see
+vox_tracer.ridge.detection_band_features):
 
     python scripts/segmentation/apply_mask_filter.py outputs/sam3/dryad_gerbil outputs/sam3_flatness_filtered/dryad_gerbil \
         --channels 0 --flat-layout --recording-dir-base data/dryad_gerbil --prefix mic \
@@ -45,13 +46,14 @@ def _poly_mask(seg, H, W):
 
 
 def filter_coco(coco, max_area_frac, min_sweep_frac, min_cols,
-                max_flatness=None, audio=None, sr=None, nyquist=None):
+                max_flatness=None, min_centroid_hz=None, audio=None, sr=None, nyquist=None):
     """Return (new_coco, n_kept, n_dropped); images are preserved, annotations filtered.
 
-    max_flatness/audio/sr/nyquist are all-or-nothing: pass all four to also gate
-    on band-limited spectral flatness (re-derived from each annotation's stored
-    bbox + its image's window_start_sec/window_end_sec), or leave them at None
-    to keep the original geometry-only behavior.
+    max_flatness/min_centroid_hz on one side and audio/sr/nyquist on the other are
+    all-or-nothing: pass audio/sr/nyquist plus either (or both) spectral gate to
+    also gate on band-limited spectral flatness/centroid (re-derived from each
+    annotation's stored bbox + its image's window_start_sec/window_end_sec), or
+    leave audio at None to keep the original geometry-only behavior.
     """
     img_by_id = {im["id"]: im for im in coco["images"]}
     kept = []
@@ -59,12 +61,15 @@ def filter_coco(coco, max_area_frac, min_sweep_frac, min_cols,
         im = img_by_id[ann["image_id"]]
         H, W = im["height"], im["width"]
         mask = _poly_mask(ann.get("segmentation", []), H, W)
-        flatness = None
-        if max_flatness is not None:
-            _centroid, flatness = detection_spectral_features(
+        centroid = flatness = None
+        if audio is not None and (max_flatness is not None or min_centroid_hz is not None):
+            centroid, flatness = detection_spectral_features(
                 audio, sr, ann["bbox"], im["window_start_sec"], im["window_end_sec"], H, W, nyquist)
         if passes_mask_filters(mask, H, W, max_area_frac, min_sweep_frac, min_cols,
-                               flatness=flatness, max_flatness=max_flatness):
+                               centroid_hz=(centroid if min_centroid_hz is not None else None),
+                               min_centroid_hz=min_centroid_hz,
+                               flatness=(flatness if max_flatness is not None else None),
+                               max_flatness=max_flatness):
             kept.append(ann)
     dropped = len(coco["annotations"]) - len(kept)
     for new_id, ann in enumerate(kept):
@@ -82,6 +87,9 @@ def main():
     ap.add_argument("--min-mask-cols",       type=int,   default=5)
     ap.add_argument("--max-flatness", type=float, default=None,
                     help="also gate on band-limited spectral flatness (e.g. 0.21); "
+                         "requires --recording-dir-base for the source audio")
+    ap.add_argument("--min-centroid-hz", type=float, default=None,
+                    help="also gate on band-limited spectral centroid (e.g. 25000); "
                          "requires --recording-dir-base for the source audio")
     ap.add_argument("--recording-dir-base", default=None,
                     help="root containing per-recording audio, e.g. data/dryad_gerbil "
@@ -102,35 +110,35 @@ def main():
     files = [f for f in files if int(f.stem.split("_")[-1]) in channels]
     print(f"{len(files)} coco files under {in_base}")
 
-    if args.max_flatness is not None and not args.recording_dir_base:
-        raise SystemExit("--max-flatness needs --recording-dir-base (source audio)")
+    needs_audio = args.max_flatness is not None or args.min_centroid_hz is not None
+    if needs_audio and not args.recording_dir_base:
+        raise SystemExit("--max-flatness/--min-centroid-hz need --recording-dir-base (source audio)")
 
-    audio_cache = {}
     def _audio_for(rec_dir, ch):
-        key = (str(rec_dir), ch)
-        if key not in audio_cache:
-            loaded = load_channel_audio(rec_dir, ch, prefix=args.prefix)
-            audio_cache[key] = (loaded[0], loaded[1]) if loaded is not None else (None, None)
-        return audio_cache[key]
+        # No cache: each (rec_dir, ch) is visited exactly once below, so caching would
+        # only accumulate every recording's raw audio in memory for no benefit.
+        loaded = load_channel_audio(rec_dir, ch, prefix=args.prefix)
+        return (loaded[0], loaded[1]) if loaded is not None else (None, None)
 
     tot_kept = tot_drop = 0
     for f in files:
         rel = f.relative_to(in_base)
         ch = int(f.stem.split("_")[-1])
         audio = sr = nyquist = None
-        if args.max_flatness is not None:
+        if needs_audio:
             rec_dir = (Path(args.recording_dir_base) / rel.parts[0] if args.flat_layout
                       else Path(args.recording_dir_base) / rel.parts[0] / rel.parts[1])
             sr, audio = _audio_for(rec_dir, ch)
             nyquist = (sr / 2.0) if audio is not None else (args.sample_rate / 2.0)
             if audio is None:
-                print(f"  {rel}: no audio in {rec_dir} -> flatness gate skipped for this file")
+                print(f"  {rel}: no audio in {rec_dir} -> spectral gates skipped for this file")
 
         with open(f) as fh:
             coco = json.load(fh)
         new_coco, kept, dropped = filter_coco(
             coco, args.max_mask_area_frac, args.min_freq_sweep_frac, args.min_mask_cols,
             max_flatness=(args.max_flatness if audio is not None else None),
+            min_centroid_hz=(args.min_centroid_hz if audio is not None else None),
             audio=audio, sr=sr, nyquist=nyquist)
         tot_kept += kept
         tot_drop += dropped

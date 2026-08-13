@@ -1,31 +1,29 @@
 """
 Run any vox_tracer model on pre-generated spectrogram PNGs.
 
+spec_dir is always outputs/spectrograms/<dataset>[/<recording>] and out_dir is
+always <out_dir>/<dataset>[/<recording>] -- --dataset is required and out_dir is
+just the stage/variant name (e.g. "outputs/ridge_flatness", "outputs/sam3_best").
+
 Single recording:
-    python scripts/run.py ridge     <spec_dir> <out_dir> [options]
-    python scripts/run.py squeakout <spec_dir> <out_dir> [options]
-    python scripts/run.py sam3      <spec_dir> <out_dir> [options]
-    python scripts/run.py das_yolo  <recording_dir> <spec_dir> <out_dir> [options]
+    python scripts/run.py ridge     <out_dir> --dataset <dataset> --recording <exp>/<idx> [options]
+    python scripts/run.py das_yolo  <out_dir> --dataset <dataset> --recording <exp>/<idx> [options]
 
-All recordings under a root (--all mirrors experiment_*/idx_* structure):
-    python scripts/run.py ridge    <spec_base> <out_base> --all --workers 8
-    python scripts/run.py das_yolo <data_root> <spec_base> <out_base> --all --workers 1
+All recordings in the dataset:
+    python scripts/run.py ridge    <out_dir> --dataset <dataset> --all --workers 8
+    python scripts/run.py das_yolo <out_dir> --dataset <dataset> --all --workers 1
 
-Output: <out_dir>/coco_ch_<ch>.json per channel.
+Output: <out_dir>/<dataset>/coco_ch_<ch>.json per channel.
 
 Examples
 --------
 # single recording
-python scripts/run.py sam3 \
-    outputs/spectrograms/gerbil_ssl/experiment_445/idx_011 \
-    outputs/sam3/experiment_445/idx_011 \
-    --sam3-checkpoint sam3/sam3.pt
+python scripts/run.py sam3 outputs/sam3 --dataset gerbil_ssl \
+    --recording experiment_445/idx_011 --sam3-checkpoint sam3/sam3.pt
 
 # all recordings in parallel
-python scripts/run.py sam3 \
-    outputs/spectrograms/gerbil_ssl \
-    outputs/sam3 \
-    --sam3-checkpoint sam3/sam3.pt
+python scripts/run.py sam3 outputs/sam3 --dataset gerbil_ssl \
+    --all --sam3-checkpoint sam3/sam3.pt
 """
 import argparse
 import sys
@@ -33,6 +31,8 @@ from concurrent.futures import ProcessPoolExecutor, as_completed
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
+
+DATASETS = ("gerbil_ssl", "dryad_gerbil", "gerbil_family")
 
 
 def _discover(base):
@@ -67,15 +67,19 @@ sub = parser.add_subparsers(dest="model", required=True)
 
 
 def _add_spec_args(p):
-    p.add_argument("spec_dir")
-    p.add_argument("out_dir")
+    p.add_argument("out_dir", help="stage/variant name, e.g. outputs/ridge_flatness "
+                                    "(dataset is appended automatically)")
+    p.add_argument("--dataset", required=True, choices=DATASETS)
+    p.add_argument("--recording", default=None,
+                   help="single experiment_X/idx_Y to process (omit and pass --all instead "
+                        "to process every recording in the dataset)")
     p.add_argument("--channels", default="118,35")
     p.add_argument("--prefix",  default="headmic",
                    help="recording-stream filename prefix, matching '{prefix}_{ch}_..._t{t0}-{t1}.png' "
                         "spectrograms and '{prefix}_{ch}_*.wav' audio (default: headmic, the gerbil_ssl "
                         "multi-mic rig). A single-stream dataset can pass its own label with --channels 0.")
     p.add_argument("--all",     action="store_true",
-                   help="process all experiment_*/idx_* under spec_dir; mirror structure into out_dir")
+                   help="process all experiment_*/idx_* in the dataset; mirror structure into out_dir")
     p.add_argument("--workers", type=int, default=1,
                    help="parallel workers for --all (keep 1 for GPU models, default: 1)")
 
@@ -92,7 +96,7 @@ p_ridge.add_argument("--min-area",      type=int,   default=50,
                      help="stage-1 component-area cut (cross-validated best)")
 p_ridge.add_argument("--recording-dir", default=None,
                      help="dir with the headmic wavs for the centroid gate "
-                          "(default: data/gerbil_ssl/<experiment>/<idx> inferred from spec_dir)")
+                          "(default: data/<dataset>/<experiment>/<idx> inferred from spec_dir)")
 # stage-2 detection filters (cross-validated: duration + spectral-centroid gates)
 p_ridge.add_argument("--max-mask-area-frac",  type=float, default=0.15)
 p_ridge.add_argument("--min-freq-sweep-frac", type=float, default=0.0,
@@ -124,7 +128,7 @@ p_sq.add_argument("--overwrite",  action="store_true",
 # stage-2 detection filters (shared with ridge/sam3 so the comparison is fair)
 p_sq.add_argument("--recording-dir", default=None,
                   help="dir with the headmic wavs for the centroid gate "
-                       "(default: data/gerbil_ssl/<experiment>/<idx> inferred from spec_dir)")
+                       "(default: data/<dataset>/<experiment>/<idx> inferred from spec_dir)")
 p_sq.add_argument("--max-mask-area-frac",  type=float, default=0.15)
 p_sq.add_argument("--min-freq-sweep-frac", type=float, default=0.0,
                   help="frequency-sweep gate (0 = disabled; dropped by the filter search)")
@@ -154,7 +158,7 @@ p_sam3.add_argument("--close-kernel",         default="7,3", help="morph-close k
 # stage 2: SAM3 post-hoc mask filters
 p_sam3.add_argument("--recording-dir",        default=None,
                     help="dir with the headmic wavs for the centroid gate "
-                         "(default: data/gerbil_ssl/<experiment>/<idx> inferred from spec_dir)")
+                         "(default: data/<dataset>/<experiment>/<idx> inferred from spec_dir)")
 p_sam3.add_argument("--max-mask-area-frac",   type=float, default=0.15)
 p_sam3.add_argument("--min-freq-sweep-frac",  type=float, default=0.0,
                     help="frequency-sweep gate (0 = disabled; dropped by the filter search)")
@@ -171,15 +175,16 @@ p_sam3.add_argument("--overwrite",            action="store_true",
 
 # --- das_yolo ---
 p_yolo = sub.add_parser("das_yolo", help="DAS-guided YOLO detection")
-p_yolo.add_argument("recording_dir",
-                    help="data root (--all) or single recording dir with .wav + DAS CSV")
-p_yolo.add_argument("spec_dir",
-                    help="spec base (--all) or single pre-generated spec dir")
-p_yolo.add_argument("out_dir")
+p_yolo.add_argument("out_dir", help="stage/variant name, e.g. outputs/das_yolo "
+                                     "(dataset is appended automatically)")
+p_yolo.add_argument("--dataset", required=True, choices=DATASETS)
+p_yolo.add_argument("--recording", default=None,
+                    help="single experiment_X/idx_Y to process (omit and pass --all instead "
+                         "to process every recording in the dataset)")
 p_yolo.add_argument("--channels",  default="118,35")
 p_yolo.add_argument("--chunk-sec", type=float, default=1.0)
 p_yolo.add_argument("--all",       action="store_true",
-                    help="process all experiment_*/idx_* under recording_dir/spec_dir")
+                    help="process all experiment_*/idx_* in the dataset")
 p_yolo.add_argument("--workers",   type=int, default=1)
 
 args = parser.parse_args()
@@ -198,8 +203,6 @@ if args.model == "ridge":
               min_centroid_hz=args.min_centroid_hz,
               max_flatness=args.max_flatness,
               prefix=args.prefix)
-    if not args.all:
-        kw["reject_out_dir"] = args.reject_out_dir
 elif args.model == "squeakout":
     kw = dict(channels=channels, checkpoint=args.checkpoint, batch_size=args.batch_size,
               mask_threshold=args.mask_threshold, overwrite=args.overwrite,
@@ -229,22 +232,27 @@ elif args.model == "sam3":
 elif args.model == "das_yolo":
     kw = dict(channels=channels, chunk_sec=args.chunk_sec)
 
-if not args.all:
-    if args.model == "das_yolo":
-        kw["recording_dir"] = args.recording_dir
-    _run_one(args.model, args.spec_dir, args.out_dir, kw)
-else:
-    spec_base = Path(args.spec_dir)
-    out_base  = Path(args.out_dir)
+spec_base = Path("outputs") / "spectrograms" / args.dataset
+out_base  = Path(args.out_dir) / args.dataset
+reject_base = (Path(args.reject_out_dir) / args.dataset
+               if args.model == "ridge" and args.reject_out_dir else None)
+data_base = Path("data") / args.dataset if args.model == "das_yolo" else None
 
+if args.recording:
+    spec_dir = spec_base / args.recording
+    out_dir  = out_base / args.recording
     if args.model == "das_yolo":
-        data_base = Path(args.recording_dir)
+        kw["recording_dir"] = str(data_base / args.recording)
+    elif args.model == "ridge" and reject_base:
+        kw["reject_out_dir"] = str(reject_base / args.recording)
+    _run_one(args.model, str(spec_dir), str(out_dir), kw)
+elif args.all:
+    if args.model == "das_yolo":
         tasks = [
             (str(idx_dir), str(out_base / rel), {**kw, "recording_dir": str(data_base / rel)})
             for rel, idx_dir in _discover(spec_base)
         ]
-    elif args.model == "ridge" and args.reject_out_dir:
-        reject_base = Path(args.reject_out_dir)
+    elif args.model == "ridge" and reject_base:
         tasks = [
             (str(idx_dir), str(out_base / rel),
              {**kw, "reject_out_dir": str(reject_base / rel)})
@@ -282,3 +290,5 @@ else:
                     failed += 1
 
     print(f"\nDone: {done} succeeded, {failed} failed.")
+else:
+    parser.error("either --recording <exp>/<idx> or --all is required")

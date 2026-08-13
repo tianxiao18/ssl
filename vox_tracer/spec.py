@@ -117,12 +117,3 @@ def calibrate_db_range(audio, sr, lo_pct=1.0, hi_pct=99.9, n_windows=6, window_s
         dbs.append(10 * np.log10(Pxx + 1e-12).ravel())
     allb = np.concatenate(dbs)
     return float(np.percentile(allb, lo_pct)), float(np.percentile(allb, hi_pct))
-
-
-def default_spec_dir(out_dir):
-    """Infer shared spectrogram directory from an output directory.
-
-    Follows the convention outputs/<tool>/<exp_id> → outputs/spectrograms/gerbil_ssl/<exp_id>.
-    """
-    out_dir = Path(out_dir)
-    return out_dir.parent.parent / "spectrograms" / "gerbil_ssl" / out_dir.name
