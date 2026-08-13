@@ -26,7 +26,7 @@ Output: one CSV per method, one row per detected event, provenance columns +
 Example
 -------
     python scripts/evaluation/spectral_features.py \
-        --methods sam3_best ridge squeakout \
+        --methods sam3_best ridge squeakout --dataset gerbil_ssl \
         --out-dir outputs/spectral_features
 """
 import argparse
@@ -181,27 +181,28 @@ def process_recording(coco_path, recording_dir, ch, method):
     return rows, degenerate
 
 
-def discover(method_root):
+def discover(method_root, dataset):
     """Yield (coco_path, recording_dir, channel) for every coco_ch_*.json under a method root."""
     for coco in sorted(Path(method_root).glob("experiment_*/idx_*/coco_ch_*.json")):
         ch = int(coco.stem.split("_")[-1])
         exp, idx = coco.parts[-3], coco.parts[-2]
-        yield coco, Path("data") / "gerbil_ssl" / exp / idx, ch
+        yield coco, Path("data") / dataset / exp / idx, ch
 
 
 def main():
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
-    ap.add_argument("--outputs-root", default="outputs", help="dir holding <method>/ trees")
+    ap.add_argument("--outputs-root", default="outputs", help="dir holding <method>/<dataset>/ trees")
     ap.add_argument("--methods", nargs="+",
                     default=["sam3_best", "ridge_filtered", "squeakout_filtered"])
+    ap.add_argument("--dataset", required=True, choices=("gerbil_ssl", "dryad_gerbil", "gerbil_family"))
     ap.add_argument("--out-dir", type=Path, default=Path("outputs/spectral_features"))
     ap.add_argument("--limit", type=int, default=None, help="cap coco files per method (debug)")
     args = ap.parse_args()
     args.out_dir.mkdir(parents=True, exist_ok=True)
 
     for method in args.methods:
-        root = Path(args.outputs_root) / method
-        tasks = list(discover(root))
+        root = Path(args.outputs_root) / method / args.dataset
+        tasks = list(discover(root, args.dataset))
         if args.limit:
             tasks = tasks[:args.limit]
         print(f"\n[{method}] {len(tasks)} coco files")

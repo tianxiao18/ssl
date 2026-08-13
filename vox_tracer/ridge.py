@@ -6,6 +6,7 @@ import numpy as np
 from skimage.filters import frangi, hessian, meijering, sato
 
 from vox_tracer.coco import image_entry, make_coco, poly_annotation, save_coco_per_channel
+from vox_tracer.paths import recording_dir_from_spec_dir
 from vox_tracer.spec import group_specs_by_channel, load_channel_audio
 
 FILTER_NAMES = ("sato", "meijering", "frangi", "hessian")
@@ -216,7 +217,7 @@ def run_ridge(
 
     spec_dir = Path(spec_dir)
     if recording_dir is None:
-        recording_dir = Path("data") / "gerbil_ssl" / spec_dir.parent.name / spec_dir.name
+        recording_dir = recording_dir_from_spec_dir(spec_dir)
     by_ch = group_specs_by_channel(spec_dir, channels, prefix=prefix)
     coco_by_ch = {}
     reject_coco_by_ch = {}

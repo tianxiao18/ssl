@@ -7,6 +7,7 @@ import numpy as np
 import torch
 
 from vox_tracer.coco import image_entry, make_coco, mask_to_polygons, poly_annotation, save_coco_per_channel
+from vox_tracer.paths import recording_dir_from_spec_dir
 from vox_tracer.ridge import detection_spectral_features, passes_mask_filters
 from vox_tracer.spec import group_specs_by_channel, load_channel_audio
 
@@ -80,7 +81,7 @@ def run_squeakout(spec_dir, out_dir, channels=None, checkpoint=None,
     spec_dir = Path(spec_dir)
     out_dir  = Path(out_dir)
     if recording_dir is None:
-        recording_dir = Path("data") / "gerbil_ssl" / spec_dir.parent.name / spec_dir.name
+        recording_dir = recording_dir_from_spec_dir(spec_dir)
 
     by_ch = group_specs_by_channel(spec_dir, channels, prefix=prefix)
     pending = {ch: entries for ch, entries in by_ch.items()

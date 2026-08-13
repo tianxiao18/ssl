@@ -8,6 +8,7 @@ from PIL import Image
 from skimage.filters import sato
 
 from vox_tracer.coco import image_entry, make_coco, mask_to_polygons, poly_annotation, save_coco_per_channel
+from vox_tracer.paths import recording_dir_from_spec_dir
 from vox_tracer.ridge import compute_seg_mask, detection_spectral_features, passes_mask_filters
 from vox_tracer.spec import group_specs_by_channel, load_channel_audio
 
@@ -188,7 +189,7 @@ def run_sam3(
     """
     spec_dir = Path(spec_dir)
     if recording_dir is None:
-        recording_dir = Path("data") / "gerbil_ssl" / spec_dir.parent.name / spec_dir.name
+        recording_dir = recording_dir_from_spec_dir(spec_dir)
 
     by_ch = group_specs_by_channel(spec_dir, channels, prefix=prefix)
     coco_by_ch = {}
