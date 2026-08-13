@@ -24,7 +24,7 @@ output location; run this first.
 
 ---
 
-### Step 2 — Run segmentation (any order, all read `outputs/spectrograms/<dataset>/`, all write `coco_ch_<ch>.json`)
+### Step 2 — Run segmentation
 
 All models are invoked through a single unified script, `scripts/run.py <model> <out_dir>
 --dataset <dataset> [--all | --recording <exp>/<idx>] [options]` — `out_dir` is just the

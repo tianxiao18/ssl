@@ -1,0 +1,60 @@
+# Minimal, tested dependency set for the detection pipeline (scripts/, vox_tracer/).
+#
+# Install this FIRST, then install the two heavyweight, --no-deps-only packages:
+#     pip install -r requirements.txt
+#     pip install -e sam3/ --no-deps
+#     pip install inference==1.2.12 --no-deps
+#
+# Both need --no-deps for the same reason: each pulls in a dependency list far
+# outside what we actually use, and each conflicts with the rest of this file
+# if pip is left to resolve it normally.
+#   - sam3/pyproject.toml pins numpy>=1.26,<2 and ftfy==6.1.1 exactly, both of
+#     which conflict with what's pinned below (numpy 2.x is what
+#     scipy/scikit-image/pandas here are built against; ftfy 6.3.x is what's
+#     actually been running). sam3's *other* runtime deps (timm, ftfy, iopath,
+#     regex, typing_extensions, huggingface_hub) are still needed, so they're
+#     pinned below instead, at versions confirmed compatible with numpy 2.x
+#     rather than sam3's own (looser, older) declared minimums.
+#   - inference (Roboflow's package, used only for scripts/run.py das_yolo's
+#     `from inference import get_model`) pulls in an entire unrelated server
+#     stack (aiohttp, boto3, docker, fastapi, redis, twilio, anthropic,
+#     slack-sdk, ...) and pins click<8.2.0, which directly conflicts with
+#     huggingface_hub's click>=8.4.0 pinned below -- `pip install -r
+#     requirements.txt` fails outright if inference is left in this file.
+#     get_model() only needs numpy/opencv/torch, all already pinned below.
+
+--extra-index-url https://download.pytorch.org/whl/cu126
+
+# --- core: gen_spectrograms.py, evaluate.py, compare_methods.py, ridge ---
+numpy==2.2.6
+scipy==1.15.3
+opencv-python==4.10.0.84
+scikit-image==0.25.2
+pandas==2.3.3
+matplotlib==3.10.9
+
+# --- squeakout + SAM3 (both need torch; ridge's core path doesn't) ---
+torch==2.12.0+cu126
+torchvision==0.27.0+cu126
+
+# --- call-type gating (scripts/segmentation/run_sam3_calltype.py, dryad_gerbil only) ---
+h5py==3.16.0
+
+# --- scripts/evaluation/spectral_features.py ---
+librosa==0.11.0
+
+# --- SAM3's own runtime deps, pinned here instead of resolved via sam3's
+#     pyproject.toml (see --no-deps note above) ---
+timm==1.0.27
+ftfy==6.3.1
+iopath==0.1.10
+regex==2026.5.9
+typing_extensions==4.15.0
+huggingface_hub==1.20.1
+tqdm==4.67.3
+
+# --- scripts/run.py das_yolo (inference itself installed separately, see above) ---
+supervision==0.28.0
+
+# --- scripts/segmentation/finetune_squeakout.py ---
+pycocotools==2.0.11
