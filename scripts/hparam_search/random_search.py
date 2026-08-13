@@ -1,7 +1,7 @@
 """
 Random search over the SAM3 ridge-exemplar hyperparameter space.
 
-Unlike scripts/sweep_hparams.py (one-at-a-time around a baseline), this samples
+Unlike scripts/hparam_search/sweep_hparams.py (one-at-a-time around a baseline), this samples
 FULL configurations from the joint space, so it captures interactions between
 variables. Each config is scored against ground truth (*annotations_gt.csv, vox
 intervals) by 1-D time IoU.
@@ -16,7 +16,7 @@ Requires a GPU (SAM3 inference runs under torch.autocast(cuda)).
 
 Usage
 -----
-    python scripts/random_search.py <spec_base> <recording_base> <out_dir> \
+    python scripts/hparam_search/random_search.py <spec_base> <recording_base> <out_dir> \
         --n-sessions 3 --n-trials 60 --stage2-per-trial 10 \
         --sam3-checkpoint sam3/sam3.pt --objective f1 --seed 0
 
@@ -41,9 +41,10 @@ import matplotlib
 matplotlib.use("Agg")
 import matplotlib.pyplot as plt
 
-sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
+sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 
-from vox_tracer.sam3_runner import build_processor, _passes_mask_filters
+from vox_tracer.ridge import passes_mask_filters
+from vox_tracer.sam3_runner import build_processor
 from vox_tracer.sweep_core import (
     _bbox_to_interval, discover_sessions, gpu_pass, load_gt_for_sessions,
     resolve_sessions, ridge_preds, score_all, stage1_of, stage2_of,
@@ -51,7 +52,7 @@ from vox_tracer.sweep_core import (
 
 # ── search space (edit ranges to retune) ───────────────────────────────────────
 # Each sampler takes a random.Random and returns one value. The space was pruned
-# using scripts/sweep_hparams.py: variables whose SAM3-precision span was < ~0.02
+# using scripts/hparam_search/sweep_hparams.py: variables whose SAM3-precision span was < ~0.02
 # across their whole sweep (min_area, horiz_aspect, close_kernel, max_mask_area_frac
 # — and sigmas, which had no measurable effect) are dropped to FIXED. Ranges are
 # clipped to the useful region of each sweep, away from the cliffs where recall or
@@ -108,8 +109,8 @@ def sam3_preds_scored(windows, stage2, score_thr):
         for mask_u8, score in w["raw_masks"]:
             if score <= score_thr:
                 continue
-            if not _passes_mask_filters(mask_u8, w["H"], w["W"], stage2["max_mask_area_frac"],
-                                        stage2["min_freq_sweep_frac"], stage2["min_mask_cols"]):
+            if not passes_mask_filters(mask_u8, w["H"], w["W"], stage2["max_mask_area_frac"],
+                                       stage2["min_freq_sweep_frac"], stage2["min_mask_cols"]):
                 continue
             x, _, w_box, _ = cv2.boundingRect((mask_u8 > 0).astype(np.uint8))
             out[(w["session"], w["ch"])].append(

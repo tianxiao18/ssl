@@ -17,13 +17,13 @@ Examples
 --------
 # single recording
 python scripts/run.py sam3 \
-    outputs/spectrograms/experiment_445/idx_011 \
+    outputs/spectrograms/gerbil_ssl/experiment_445/idx_011 \
     outputs/sam3/experiment_445/idx_011 \
     --sam3-checkpoint sam3/sam3.pt
 
 # all recordings in parallel
 python scripts/run.py sam3 \
-    outputs/spectrograms \
+    outputs/spectrograms/gerbil_ssl \
     outputs/sam3 \
     --sam3-checkpoint sam3/sam3.pt
 """
@@ -70,6 +70,10 @@ def _add_spec_args(p):
     p.add_argument("spec_dir")
     p.add_argument("out_dir")
     p.add_argument("--channels", default="118,35")
+    p.add_argument("--prefix",  default="headmic",
+                   help="recording-stream filename prefix, matching '{prefix}_{ch}_..._t{t0}-{t1}.png' "
+                        "spectrograms and '{prefix}_{ch}_*.wav' audio (default: headmic, the gerbil_ssl "
+                        "multi-mic rig). A single-stream dataset can pass its own label with --channels 0.")
     p.add_argument("--all",     action="store_true",
                    help="process all experiment_*/idx_* under spec_dir; mirror structure into out_dir")
     p.add_argument("--workers", type=int, default=1,
@@ -84,12 +88,54 @@ p_ridge.add_argument("--sigmas",        default="2,3,4")
 p_ridge.add_argument("--threshold-pct", type=float, default=99.0)
 p_ridge.add_argument("--sample-rate",   type=int,   default=125000)
 p_ridge.add_argument("--freq-min",      type=float, default=20000.0)
+p_ridge.add_argument("--min-area",      type=int,   default=50,
+                     help="stage-1 component-area cut (cross-validated best)")
+p_ridge.add_argument("--recording-dir", default=None,
+                     help="dir with the headmic wavs for the centroid gate "
+                          "(default: data/gerbil_ssl/<experiment>/<idx> inferred from spec_dir)")
+# stage-2 detection filters (cross-validated: duration + spectral-centroid gates)
+p_ridge.add_argument("--max-mask-area-frac",  type=float, default=0.15)
+p_ridge.add_argument("--min-freq-sweep-frac", type=float, default=0.0,
+                     help="frequency-sweep gate (0 = disabled; dropped by the filter search)")
+p_ridge.add_argument("--min-mask-cols",       type=int,   default=9,
+                     help="reject detections spanning fewer than this many time columns")
+p_ridge.add_argument("--min-centroid-hz",     type=float, default=25000.0,
+                     help="reject detections whose band-limited spectral centroid is below this "
+                          "(pass 0 to disable)")
+p_ridge.add_argument("--max-flatness",        type=float, default=None,
+                     help="reject detections whose band-limited spectral flatness exceeds this "
+                          "(disabled unless set; flatness-only best is ~0.21). To run flatness "
+                          "as the sole stage-2 filter also pass --min-mask-cols 0 --min-centroid-hz 0")
+p_ridge.add_argument("--reject-out-dir",      default=None,
+                     help="also write every stage-2-rejected stage-1 candidate here, tagged with "
+                          "extra.reject_reason (diagnostic only, not scored). With --all this is "
+                          "mirrored per-recording the same way out_dir is.")
 
 # --- squeakout ---
 p_sq = sub.add_parser("squeakout", help="SqueakOut neural segmentation")
 _add_spec_args(p_sq)
 p_sq.add_argument("--checkpoint", default=None)
 p_sq.add_argument("--batch-size", type=int, default=16)
+p_sq.add_argument("--mask-threshold", type=float, default=None,
+                  help="sigmoid cut to binarize masks (default: model's ~0.51). Lower it "
+                       "(e.g. 0.1) for a permissive run so pr_curves.py has a high-recall arm.")
+p_sq.add_argument("--overwrite",  action="store_true",
+                  help="reprocess channels that already have output")
+# stage-2 detection filters (shared with ridge/sam3 so the comparison is fair)
+p_sq.add_argument("--recording-dir", default=None,
+                  help="dir with the headmic wavs for the centroid gate "
+                       "(default: data/gerbil_ssl/<experiment>/<idx> inferred from spec_dir)")
+p_sq.add_argument("--max-mask-area-frac",  type=float, default=0.15)
+p_sq.add_argument("--min-freq-sweep-frac", type=float, default=0.0,
+                  help="frequency-sweep gate (0 = disabled; dropped by the filter search)")
+p_sq.add_argument("--min-mask-cols",       type=int,   default=9,
+                  help="reject components spanning fewer than this many time columns")
+p_sq.add_argument("--min-centroid-hz",     type=float, default=25000.0,
+                  help="reject components whose band-limited spectral centroid is below this "
+                       "(pass 0 to disable)")
+p_sq.add_argument("--max-flatness",        type=float, default=None,
+                  help="reject components whose band-limited spectral flatness exceeds this "
+                       "(disabled unless set)")
 
 # --- sam3 ---
 p_sam3 = sub.add_parser("sam3", help="SAM3 segmentation via sato ridge exemplar")
@@ -106,10 +152,20 @@ p_sam3.add_argument("--vert-aspect",          type=float, default=5.0)
 p_sam3.add_argument("--horiz-aspect",         type=float, default=0.2)
 p_sam3.add_argument("--close-kernel",         default="7,3", help="morph-close kernel 'w,h'")
 # stage 2: SAM3 post-hoc mask filters
+p_sam3.add_argument("--recording-dir",        default=None,
+                    help="dir with the headmic wavs for the centroid gate "
+                         "(default: data/gerbil_ssl/<experiment>/<idx> inferred from spec_dir)")
 p_sam3.add_argument("--max-mask-area-frac",   type=float, default=0.15)
-p_sam3.add_argument("--min-freq-sweep-frac",  type=float, default=0.04)
-p_sam3.add_argument("--min-mask-cols",        type=int,   default=5,
+p_sam3.add_argument("--min-freq-sweep-frac",  type=float, default=0.0,
+                    help="frequency-sweep gate (0 = disabled; dropped by the filter search)")
+p_sam3.add_argument("--min-mask-cols",        type=int,   default=9,
                     help="reject SAM3 masks spanning fewer than this many time columns")
+p_sam3.add_argument("--min-centroid-hz",      type=float, default=25000.0,
+                    help="reject SAM3 masks whose band-limited spectral centroid is below this "
+                         "(pass 0 to disable)")
+p_sam3.add_argument("--max-flatness",         type=float, default=None,
+                    help="reject SAM3 masks whose band-limited spectral flatness exceeds this "
+                         "(disabled unless set)")
 p_sam3.add_argument("--overwrite",            action="store_true",
                     help="reprocess channels that already have output")
 
@@ -134,9 +190,26 @@ if args.model == "ridge":
     kw = dict(channels=channels, filter_name=args.filter,
               sigmas=[float(s) for s in args.sigmas.split(",")],
               threshold_pct=args.threshold_pct,
-              sample_rate=args.sample_rate, freq_min=args.freq_min)
+              sample_rate=args.sample_rate, freq_min=args.freq_min,
+              min_area=args.min_area, recording_dir=args.recording_dir,
+              max_mask_area_frac=args.max_mask_area_frac,
+              min_freq_sweep_frac=args.min_freq_sweep_frac,
+              min_mask_cols=args.min_mask_cols,
+              min_centroid_hz=args.min_centroid_hz,
+              max_flatness=args.max_flatness,
+              prefix=args.prefix)
+    if not args.all:
+        kw["reject_out_dir"] = args.reject_out_dir
 elif args.model == "squeakout":
-    kw = dict(channels=channels, checkpoint=args.checkpoint, batch_size=args.batch_size)
+    kw = dict(channels=channels, checkpoint=args.checkpoint, batch_size=args.batch_size,
+              mask_threshold=args.mask_threshold, overwrite=args.overwrite,
+              recording_dir=args.recording_dir,
+              max_mask_area_frac=args.max_mask_area_frac,
+              min_freq_sweep_frac=args.min_freq_sweep_frac,
+              min_mask_cols=args.min_mask_cols,
+              min_centroid_hz=args.min_centroid_hz,
+              max_flatness=args.max_flatness,
+              prefix=args.prefix)
 elif args.model == "sam3":
     kw = dict(channels=channels, checkpoint=args.sam3_checkpoint,
               sigmas=[float(s) for s in args.sigmas.split(",")],
@@ -145,10 +218,14 @@ elif args.model == "sam3":
               min_area=args.min_area, vert_aspect=args.vert_aspect,
               horiz_aspect=args.horiz_aspect,
               close_kernel=tuple(int(s) for s in args.close_kernel.split(",")),
+              recording_dir=args.recording_dir,
               max_mask_area_frac=args.max_mask_area_frac,
               min_freq_sweep_frac=args.min_freq_sweep_frac,
               min_mask_cols=args.min_mask_cols,
-              overwrite=args.overwrite)
+              min_centroid_hz=args.min_centroid_hz,
+              max_flatness=args.max_flatness,
+              overwrite=args.overwrite,
+              prefix=args.prefix)
 elif args.model == "das_yolo":
     kw = dict(channels=channels, chunk_sec=args.chunk_sec)
 
@@ -164,6 +241,13 @@ else:
         data_base = Path(args.recording_dir)
         tasks = [
             (str(idx_dir), str(out_base / rel), {**kw, "recording_dir": str(data_base / rel)})
+            for rel, idx_dir in _discover(spec_base)
+        ]
+    elif args.model == "ridge" and args.reject_out_dir:
+        reject_base = Path(args.reject_out_dir)
+        tasks = [
+            (str(idx_dir), str(out_base / rel),
+             {**kw, "reject_out_dir": str(reject_base / rel)})
             for rel, idx_dir in _discover(spec_base)
         ]
     else:

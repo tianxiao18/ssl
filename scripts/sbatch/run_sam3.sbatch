@@ -8,7 +8,7 @@
 #SBATCH --time=24:00:00
 #SBATCH --output=/tmp/%x-%j.out
 
-SPEC_BASE="outputs/spectrograms"
+SPEC_BASE="outputs/spectrograms/gerbil_ssl"
 OUT_BASE="outputs/sam3"
 CHECKPOINT="sam3/sam3.pt"        # leave empty to download from HuggingFace
 OVERWRITE="--overwrite"         # set to "--overwrite" to reprocess existing outputs

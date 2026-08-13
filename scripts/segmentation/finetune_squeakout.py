@@ -11,14 +11,14 @@ Augmentations (per-batch, independent probabilities):
   (d) 33%  — one of: additive noise / Gaussian noise / frequency noise / elastic
 
 Usage:
-    python scripts/finetune_squeakout.py \
+    python scripts/segmentation/finetune_squeakout.py \
         <recording_dir> <coco_json> <out_dir> \
         [--gt-spec-dir DIR] [--channels 118,35] [--chunk-sec 1.0] \
         [--epochs 50] [--batch-size 8] [--lr 1e-5] \
         [--val-frac 0.2] [--freeze-backbone] [--seed 42]
 
 Example:
-    python scripts/finetune_squeakout.py \
+    python scripts/segmentation/finetune_squeakout.py \
         /mnt/home/the10/ceph/dataset/ssl_gt_data/experiment_384/idx_000 \
         outputs/squeakout_raw/exp384_idx000/_annotations.coco.json \
         outputs/squeakout_finetuned/exp384_idx000 \
@@ -44,7 +44,7 @@ from scipy.ndimage import gaussian_filter
 from scipy.signal import spectrogram as scipy_spectrogram
 from torch.utils.data import DataLoader, Dataset
 
-sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "squeakout"))
+sys.path.insert(0, str(Path(__file__).resolve().parents[2] / "squeakout"))
 from squeakout import load_model, resolve_device
 from squeakout.data import DEFAULT_IMAGE_SIZE, load_spectrogram_tensor
 from squeakout.inference import DEFAULT_MASK_THRESHOLD, logits_to_mask
@@ -350,7 +350,7 @@ val_loader   = DataLoader(val_ds,   batch_size=args.batch_size, shuffle=False,
 # ── Model ─────────────────────────────────────────────────────────────────────
 
 device = resolve_device()
-ckpt_pretrained = Path(__file__).resolve().parents[1] / "squeakout" / "squeakout_weights.ckpt"
+ckpt_pretrained = Path(__file__).resolve().parents[2] / "squeakout" / "squeakout_weights.ckpt"
 model  = load_model(ckpt_pretrained, device=device)
 
 if args.freeze_backbone:

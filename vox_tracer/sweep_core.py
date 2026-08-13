@@ -1,7 +1,7 @@
 """Shared machinery for hyperparameter tuning over the SAM3 ridge pipeline.
 
-Used by scripts/sweep_hparams.py (one-at-a-time PR sweep) and
-scripts/random_search.py (random search). Holds ground-truth loading, 1-D
+Used by scripts/hparam_search/sweep_hparams.py (one-at-a-time PR sweep) and
+scripts/hparam_search/random_search.py (random search). Holds ground-truth loading, 1-D
 time-IoU scoring (mirrors scripts/evaluate.py), the GPU inference pass, and
 prediction extraction for both the ridge and SAM3 stages.
 """
@@ -15,7 +15,8 @@ import numpy as np
 import pandas as pd
 from tqdm import tqdm
 
-from vox_tracer.sam3_runner import iter_sam3_windows, _passes_mask_filters
+from vox_tracer.ridge import passes_mask_filters
+from vox_tracer.sam3_runner import iter_sam3_windows
 from vox_tracer.spec import group_specs_by_channel
 
 # Config keys grouped by which pipeline stage consumes them.
@@ -142,8 +143,8 @@ def sam3_preds(windows, stage2):
         if w["best_box"] is None:
             continue
         for mask_u8, _score in w["raw_masks"]:
-            if not _passes_mask_filters(mask_u8, w["H"], w["W"], stage2["max_mask_area_frac"],
-                                        stage2["min_freq_sweep_frac"], stage2["min_mask_cols"]):
+            if not passes_mask_filters(mask_u8, w["H"], w["W"], stage2["max_mask_area_frac"],
+                                       stage2["min_freq_sweep_frac"], stage2["min_mask_cols"]):
                 continue
             x, _, w_box, _ = cv2.boundingRect((mask_u8 > 0).astype(np.uint8))
             out[(w["session"], w["ch"])].append(

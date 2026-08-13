@@ -9,8 +9,8 @@
 #SBATCH --time=24:00:00
 #SBATCH --output=/tmp/%x-%j.out
 
-SPEC_BASE="outputs/spectrograms"
-RECORDING_BASE="data"                 # holds <rel>/*annotations_gt.csv
+SPEC_BASE="outputs/spectrograms/gerbil_ssl"
+RECORDING_BASE="data/gerbil_ssl"      # holds <rel>/*annotations_gt.csv
 OUT_DIR="outputs/random_search"
 CHECKPOINT="sam3/sam3.pt"             # leave empty to download from HuggingFace
 
@@ -27,7 +27,7 @@ exec > "${LOGDIR}/${SLURM_JOB_NAME}-${SLURM_JOB_ID}.out" 2>&1
 cd /mnt/home/the10/ssl
 source venv/bin/activate
 
-python scripts/random_search.py \
+python scripts/hparam_search/random_search.py \
     "$SPEC_BASE" \
     "$RECORDING_BASE" \
     "$OUT_DIR" \

@@ -46,7 +46,8 @@ def overlay_polygons(bgr, polys, color=(0, 255, 255)):
 
 
 def viz_session_strip(spec_dir, pred_dir, out_dir, channels=None, cols=10,
-                      sigmas=(2, 3, 4), threshold_pct=99.0, sample_rate=125000, freq_min=20000.0):
+                      sigmas=(2, 3, 4), threshold_pct=99.0, sample_rate=125000, freq_min=20000.0,
+                      prefix="headmic"):
     """Three-row strip of every chunk in a session: raw | sato+exemplar box | predictions.
 
     The sato row shows the ridge response (yellow-green) with the pick_best_candidate
@@ -67,7 +68,7 @@ def viz_session_strip(spec_dir, pred_dir, out_dir, channels=None, cols=10,
     sigmas = list(sigmas)
     out_dir = Path(out_dir)
 
-    for ch, entries in group_specs_by_channel(spec_dir, channels).items():
+    for ch, entries in group_specs_by_channel(spec_dir, channels, prefix=prefix).items():
         pred_path = Path(pred_dir) / f"coco_ch_{ch}.json"
         if not pred_path.exists():
             continue

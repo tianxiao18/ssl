@@ -1,4 +1,6 @@
 """SAM3 segmentation guided by a sato ridge-filter candidate exemplar."""
+from pathlib import Path
+
 import cv2
 import numpy as np
 import torch
@@ -6,46 +8,39 @@ from PIL import Image
 from skimage.filters import sato
 
 from vox_tracer.coco import image_entry, make_coco, mask_to_polygons, poly_annotation, save_coco_per_channel
-from vox_tracer.ridge import compute_seg_mask
-from vox_tracer.spec import group_specs_by_channel
+from vox_tracer.ridge import compute_seg_mask, detection_spectral_features, passes_mask_filters
+from vox_tracer.spec import group_specs_by_channel, load_channel_audio
 
 
 _SATO_CACHE = {}
 
 
-def _gray_and_sato(path, sigmas):
-    """Return (gray uint8, sato response float64) for path, memoized by (path, sigmas).
+def _gray_and_sato(path, sigmas, cache=True):
+    """Return (gray uint8, sato response float64) for path.
 
-    Returns None if the image can't be read. The cached response is treated as
-    read-only by callers (compute_seg_mask / pick_best_candidate only read it).
+    Returns None if the image can't be read. The response is treated as read-only
+    by callers (compute_seg_mask / pick_best_candidate only read it).
+
+    Caching (by (path, sigmas)) exists solely for the hyperparameter sweep
+    (sweep_core.gpu_pass), which re-runs over the SAME PNGs every trial while
+    sigmas stays fixed, so the sato response is computed once and reused across
+    trials. The single-pass run_sam3 production path visits each PNG exactly once,
+    so it passes cache=False: caching there never hits and would otherwise
+    accumulate ~1 MB/window across all recordings until the process OOMs.
     """
     key = (str(path), tuple(sigmas))
-    hit = _SATO_CACHE.get(key)
-    if hit is not None:
-        return hit
+    if cache:
+        hit = _SATO_CACHE.get(key)
+        if hit is not None:
+            return hit
     gray = cv2.imread(str(path), cv2.IMREAD_GRAYSCALE)
     if gray is None:
         return None
     img_f = gray.astype(np.float64) / 255.0
     response = sato(img_f, sigmas=list(sigmas), black_ridges=False)
-    _SATO_CACHE[key] = (gray, response)
+    if cache:
+        _SATO_CACHE[key] = (gray, response)
     return gray, response
-
-
-def _passes_mask_filters(mask_u8, H, W, max_area_frac, min_sweep_frac, min_cols=5):
-    """Return True if the SAM3 mask passes area and frequency-sweep checks.
-
-    Rejects masks that are too large (SAM3 bled into background) or that
-    don't sweep through frequency (vertical noise bursts, static tones).
-    """
-    if int((mask_u8 > 0).sum()) > max_area_frac * H * W:
-        return False
-    ys, xs = np.where(mask_u8 > 0)
-    unique_xs = np.unique(xs)
-    if len(unique_xs) < min_cols:
-        return False
-    col_meds = np.array([np.median(ys[xs == x]) for x in unique_xs])
-    return (col_meds.max() - col_meds.min()) / H >= min_sweep_frac
 
 
 def pick_best_candidate(seg_mask, sato_response):
@@ -110,6 +105,7 @@ def iter_sam3_windows(
     vert_aspect=5.0,
     horiz_aspect=0.2,
     close_kernel=(7, 3),
+    cache_sato=True,
 ):
     """Yield per-window ridge + raw SAM3 results, *without* post-hoc filtering.
 
@@ -117,13 +113,17 @@ def iter_sam3_windows(
     seg_mask (ridge segmentation), best_box (SAM3 prompt or None), and
     raw_masks (list of (mask_u8, score); empty when best_box is None).
 
-    This is the expensive GPU stage. Post-hoc filters (_passes_mask_filters)
+    This is the expensive GPU stage. Post-hoc filters (vox_tracer.ridge.passes_mask_filters)
     are applied by the caller, so a single pass can be re-scored cheaply under
     many stage-2 settings.
+
+    cache_sato defaults True for the sweep (re-runs over the same PNGs across
+    trials); run_sam3 passes False for its single pass over each PNG so the sato
+    cache doesn't accumulate across all recordings (see _gray_and_sato).
     """
     sigmas = list(sigmas)
     for path, t0, t1 in entries:
-        got = _gray_and_sato(path, sigmas)
+        got = _gray_and_sato(path, sigmas, cache=cache_sato)
         if got is None:
             continue
         gray, response = got
@@ -165,22 +165,36 @@ def run_sam3(
     horiz_aspect=0.2,
     close_kernel=(7, 3),
     max_mask_area_frac=0.15,
-    min_freq_sweep_frac=0.04,
-    min_mask_cols=5,
+    min_freq_sweep_frac=0.0,
+    min_mask_cols=9,
+    min_centroid_hz=25000.0,
+    max_flatness=None,
+    recording_dir=None,
     overwrite=False,
     processor=None,
+    prefix="headmic",
 ):
     """Run SAM3 on pre-generated spectrogram PNGs; write coco_ch_{ch}.json per channel.
 
     Pass a pre-built `processor` (from build_processor) to skip model loading.
-    """
-    from pathlib import Path as _Path
 
-    by_ch = group_specs_by_channel(spec_dir, channels)
+    Stage-2 uses the same cross-validated gate as ridge: a detection is kept only
+    if it spans >= min_mask_cols time columns AND its band-limited spectral centroid
+    is >= min_centroid_hz (pass 0 to disable) AND, when max_flatness is set, its
+    band-limited flatness is <= max_flatness. The spectral gates need the source
+    audio, read from recording_dir (inferred as data/<experiment>/<idx> from spec_dir
+    when not given); if the audio is missing they are skipped and only the geometric
+    gates apply.
+    """
+    spec_dir = Path(spec_dir)
+    if recording_dir is None:
+        recording_dir = Path("data") / "gerbil_ssl" / spec_dir.parent.name / spec_dir.name
+
+    by_ch = group_specs_by_channel(spec_dir, channels, prefix=prefix)
     coco_by_ch = {}
 
     pending = {ch: entries for ch, entries in by_ch.items()
-               if overwrite or not (_Path(out_dir) / f"coco_ch_{ch}.json").exists()}
+               if overwrite or not (Path(out_dir) / f"coco_ch_{ch}.json").exists()}
     if not pending:
         print("All channels already have output, skipping.")
         return
@@ -202,11 +216,19 @@ def run_sam3(
                         "horiz_aspect": horiz_aspect, "close_kernel": list(close_kernel),
                         "max_mask_area_frac": max_mask_area_frac,
                         "min_freq_sweep_frac": min_freq_sweep_frac,
-                        "min_mask_cols": min_mask_cols},
+                        "min_mask_cols": min_mask_cols,
+                        "min_centroid_hz": min_centroid_hz,
+                        "max_flatness": max_flatness},
         )
         n_skip = 0
 
-        for win in iter_sam3_windows(processor, entries, **stage1):
+        loaded = load_channel_audio(recording_dir, ch, prefix=prefix)
+        sr, audio = (loaded[0], loaded[1]) if loaded is not None else (None, None)
+        nyquist = (sr / 2.0) if audio is not None else (sample_rate / 2.0)
+        if audio is None:
+            print(f"  sam3 ch{ch}: no audio in {recording_dir} -> spectral gates skipped")
+
+        for win in iter_sam3_windows(processor, entries, cache_sato=False, **stage1):
             iid = len(coco["images"])
             coco["images"].append(
                 image_entry(iid, win["fname"], win["W"], win["H"],
@@ -217,12 +239,21 @@ def run_sam3(
                 continue
 
             for mask_u8, score in win["raw_masks"]:
-                if not _passes_mask_filters(mask_u8, win["H"], win["W"], max_mask_area_frac,
-                                            min_freq_sweep_frac, min_mask_cols):
+                # stage-2 spectral gate: map the mask bbox back to a time segment +
+                # frequency band, then take band-limited features (one STFT).
+                centroid, flatness = detection_spectral_features(
+                    audio, sr, cv2.boundingRect(mask_u8), win["window_start"],
+                    win["window_end"], win["H"], win["W"], nyquist)
+                if not passes_mask_filters(mask_u8, win["H"], win["W"], max_mask_area_frac,
+                                           min_freq_sweep_frac, min_mask_cols,
+                                           centroid_hz=centroid, min_centroid_hz=min_centroid_hz,
+                                           flatness=flatness, max_flatness=max_flatness):
                     continue
                 for poly in mask_to_polygons(mask_u8, (win["H"], win["W"])):
                     coco["annotations"].append(
-                        poly_annotation(len(coco["annotations"]), iid, poly, extra={"score": score})
+                        poly_annotation(len(coco["annotations"]), iid, poly,
+                                        extra={"score": score, "centroid_hz": centroid,
+                                               "flatness": flatness})
                     )
 
         n_win = len(coco["images"])

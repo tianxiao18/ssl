@@ -3,7 +3,7 @@ that hyperparameter's value — so you can see where each setting lives in PR sp
 
 Usage
 -----
-    python scripts/plot_search_by_hparam.py outputs/random_search/random_search_results.csv \
+    python scripts/hparam_search/plot_search_by_hparam.py outputs/random_search/random_search_results.csv \
         [outputs/random_search/random_search_by_hparam.png]
 """
 import csv

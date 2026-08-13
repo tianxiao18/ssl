@@ -22,9 +22,9 @@ Examples
 --------
 # Single recording — with montage samples to visually inspect TP/FP/FN
 python scripts/evaluate.py \
-    outputs/spectrograms/experiment_384/idx_000 \
+    outputs/spectrograms/gerbil_ssl/experiment_384/idx_000 \
     outputs/das_yolo/experiment_384/idx_000 \
-    data/experiment_384/idx_000 \
+    data/gerbil_ssl/experiment_384/idx_000 \
     outputs/sam3_best/experiment_384/idx_000 \
     outputs/eval/sam3_best/experiment_384/idx_000 \
     --montage-samples 20 \
@@ -32,12 +32,13 @@ python scripts/evaluate.py \
 
 # All recordings — sam3 predictions, 4 workers
 python scripts/evaluate.py \
-    outputs/spectrograms \
+    outputs/spectrograms/gerbil_ssl \
     outputs/das_yolo \
     data \
-    outputs/sam3_best \
-    outputs/eval/sam3_best \
-    --all --workers 4
+    outputs/squeakout \
+    outputs/eval/squeakout \
+    --all --workers 4 \
+    --gt-csv data/sampled_contiguous_detections.csv
 """
 import argparse
 import csv
@@ -59,6 +60,14 @@ from vox_tracer.montage import (
     make_label_strip, overlay_boxes, overlay_polygons, resize_cell, save_pages,
     viz_session_strip,
 )
+from vox_tracer.scoring import (
+    iou_1d as _iou_1d,
+    bbox_to_time as _bbox_to_time,
+    merge_intervals as _merge_intervals,
+    load_gt_from_csv as _load_gt_from_csv,
+    load_gt_map as _load_gt_map,
+    score_combined,
+)
 
 parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
 parser.add_argument("spec_dir")
@@ -66,9 +75,12 @@ parser.add_argument("das_dir",       help="dir with das_yolo coco_ch_<ch>.json (
 parser.add_argument("recording_dir", help="dir with *annotations_gt.csv (source of GT intervals)")
 parser.add_argument("pred_dir")
 parser.add_argument("--gt-csv", default=None,
-                    help="global detections CSV (e.g. data/sampled_5000_detections.csv). "
+                    help="global detections CSV (e.g. data/sampled_contiguous_detections.csv). "
                          "When set, GT = is_vocalization=='yes' rows for the matching "
-                         "experiment/idx instead of the per-recording *annotations_gt.csv.")
+                         "experiment/idx instead of the per-recording *annotations_gt.csv. "
+                         "For a *contiguous* CSV, the labeled (yes/no) rows define a covered "
+                         "time span per recording; predictions outside it are ignored so that "
+                         "FP/precision is only counted where GT coverage is complete.")
 parser.add_argument("out_dir")
 parser.add_argument("--channels",         default="118,35")
 parser.add_argument("--cols",             type=int,   default=20)
@@ -108,88 +120,14 @@ def _load_coco(path):
         return json.load(f)
 
 
-def _load_gt_from_csv(recording_dir):
-    """Return (vox_intervals, combined_intervals) from *annotations_gt.csv."""
-    matches = sorted(glob(str(Path(recording_dir) / "*annotations_gt.csv")))
-    if not matches:
-        raise FileNotFoundError(f"No *annotations_gt.csv found in {recording_dir}")
-    df = pd.read_csv(matches[0])
-    vox_intervals      = []
-    combined_intervals = []
-    for _, row in df.iterrows():
-        try:
-            s, e = float(row["start_seconds"]), float(row["stop_seconds"])
-            if math.isnan(s) or math.isnan(e):
-                continue
-        except (TypeError, ValueError):
-            continue
-        if row["name"] == "vox":
-            vox_intervals.append((s, e))
-        elif row["name"] == "combined":
-            combined_intervals.append((s, e))
-    return vox_intervals, combined_intervals
-
-
-def _load_gt_map(csv_path):
-    """Return {session -> [(start, stop), ...]} of GT vocalization intervals.
-
-    Alternative GT source to _load_gt_from_csv: reads one global detections CSV
-    and keeps only is_vocalization=='yes' rows. Sessions are keyed
-    'experiment_<e>/idx_<i:03d>' to match the spec/pred directory layout, and the
-    same intervals are used for every channel (no per-channel filtering). There is
-    no 'combined' notion in this CSV, so combined metrics are reported as empty.
-    """
-    df = pd.read_csv(csv_path)
-    is_vox = df["is_vocalization"].astype(str).str.strip().str.lower() == "yes"
-    df = df[is_vox]
-
-    gt_by_rec = {}
-    for _, row in df.iterrows():
-        try:
-            s, e = float(row["start_seconds"]), float(row["stop_seconds"])
-            if math.isnan(s) or math.isnan(e):
-                continue
-        except (TypeError, ValueError):
-            continue
-        session = f"experiment_{int(row['experiment'])}/idx_{int(row['idx']):03d}"
-        gt_by_rec.setdefault(session, []).append((s, e))
-    return gt_by_rec
-
-
-def _iou_1d(a0, a1, b0, b1):
-    inter = max(0.0, min(a1, b1) - max(a0, b0))
-    union = (a1 - a0) + (b1 - b0) - inter
-    return inter / union if union > 0 else 0.0
-
-
-def _bbox_to_time(bbox, window_start, window_end, img_width):
-    x, _, w, _ = bbox
-    dur = window_end - window_start
-    return window_start + (x / img_width) * dur, window_start + ((x + w) / img_width) * dur
-
-
-def _overlap_sets(das_intervals, pred_intervals, iou_thresh):
-    """Many-to-many overlap detection (not one-to-one assignment).
-
-    A GT event is detected if it overlaps >= 1 prediction; a prediction is
-    correct if it overlaps >= 1 GT event. Returns (matched_das, matched_pred)
-    as index sets. This means duplicate predictions over the same GT event all
-    count as correct (not FP), and one prediction spanning two GT events detects
-    both — matching the rule "overlap with a GT timestamp ⇒ predicted correctly".
-    """
-    matched_das, matched_pred = set(), set()
-    for i, (ds, de) in enumerate(das_intervals):
-        for j, (ps, pe) in enumerate(pred_intervals):
-            if _iou_1d(ds, de, ps, pe) > iou_thresh:  # strict > so thresh=0.0 needs real overlap
-                matched_das.add(i)
-                matched_pred.add(j)
-    return matched_das, matched_pred
+# GT loaders, geometry helpers, and the event-level scorer live in vox_tracer.scoring
+# (imported above) so scripts/evaluation/pr_curves.py scores with the exact same logic.
 
 
 # ── per-recording evaluation ──────────────────────────────────────────────────
 
 def _evaluate_recording(spec_dir, das_dir, recording_dir, pred_dir, channels, iou_threshold, session,
-                        gt_by_rec=None):
+                        gt_by_rec=None, coverage_by_rec=None):
     """
     Returns
     -------
@@ -209,35 +147,51 @@ def _evaluate_recording(spec_dir, das_dir, recording_dir, pred_dir, channels, io
     if gt_by_rec is not None:
         vox_intervals_all = gt_by_rec.get(session, [])
         combined_intervals_all = []
-        if not vox_intervals_all:
-            print(f"  {session}: no GT vocalizations in CSV, skipping")
+        # Coverage span defines where FP is trustworthy. No coverage → all rows for
+        # this recording were blank/unlabeled, so we can't judge anything: skip.
+        coverage = coverage_by_rec.get(session) if coverage_by_rec is not None else None
+        if coverage is None:
+            print(f"  {session}: no labeled coverage in CSV, skipping")
             return rows, examples
     else:
+        coverage = None  # per-recording GT covers the whole recording — no filtering
         try:
             vox_intervals_all, combined_intervals_all = _load_gt_from_csv(recording_dir)
         except FileNotFoundError as e:
             print(f"  {session}: {e}, skipping")
             return rows, examples
 
+    # ── Pass 1: gather per-channel GT-chunk mapping, YOLO boxes, and predictions ──
+    # The GT (vox_intervals_all) is recording-level: the SAME events for every
+    # channel — a vocalization is one physical event picked up by several mics.
+    # So detection must be judged across channels combined, not per channel: an
+    # event detected in ch118 but not ch35 is a true positive, not a ch35 FN.
+    per_channel = []
+    n_pred_dropped = 0
     for ch in channels:
         das_path  = das_dir  / f"coco_ch_{ch}.json"
         pred_path = pred_dir / f"coco_ch_{ch}.json"
 
-        if not das_path.exists():
-            print(f"  {session} ch {ch}: das_yolo COCO not found, skipping")
-            continue
         if not pred_path.exists():
             print(f"  {session} ch {ch}: pred not found, skipping")
             continue
 
-        das_coco  = _load_coco(das_path)
         pred_coco = _load_coco(pred_path)
+        # das_yolo COCO is only used for the YOLO-box/DAS-band montage overlay, not
+        # for scoring (score_combined below matches GT directly against pred boxes).
+        # Datasets without a DAS baseline (e.g. dryad_gerbil) fall back to pred's own
+        # chunk windows so GT intervals can still be assigned to a chunk fname.
+        if das_path.exists():
+            das_coco = _load_coco(das_path)
+        else:
+            das_coco = {"images": pred_coco["images"], "annotations": []}
 
         das_img_by_id    = {im["id"]:        im for im in das_coco["images"]}
         das_img_by_fname = {im["file_name"]: im for im in das_coco["images"]}
         pred_img_by_id   = {im["id"]:        im for im in pred_coco["images"]}
 
-        # Assign each vox GT interval to a chunk fname using das_coco image windows
+        # Assign each vox GT interval to a chunk fname using das_coco image windows.
+        # Index i aligns with vox_intervals_all, so it is comparable across channels.
         das_chunks = sorted(das_coco["images"], key=lambda im: im.get("window_start_sec", 0))
         das_intervals = []   # (t0, t1, fname)
         for t0, t1 in vox_intervals_all:
@@ -253,81 +207,102 @@ def _evaluate_recording(spec_dir, das_dir, recording_dir, pred_dir, channels, io
             das_intervals.append((t0, t1, fname))
 
         pred_intervals = []  # (t0, t1, fname, ann)
-        pred_ann_by_fname = {}
         for ann in pred_coco["annotations"]:
             im    = pred_img_by_id[ann["image_id"]]
             fname = im["file_name"]
             t0, t1 = _bbox_to_time(ann["bbox"], im["window_start_sec"], im["window_end_sec"], im["width"])
+            # In coverage mode, ignore predictions outside the GT-complete span so
+            # they can't be counted as (untrustworthy) FP.
+            if coverage is not None and not (coverage[0] <= (t0 + t1) / 2 <= coverage[1]):
+                n_pred_dropped += 1
+                continue
             pred_intervals.append((t0, t1, fname, ann))
-            pred_ann_by_fname.setdefault(fname, []).append(ann)
 
-        # --- match at recording level (many-to-many overlap) ---
-        matched_das_set, matched_pred_set = _overlap_sets(
-            [(t0, t1) for t0, t1, _ in das_intervals],
-            [(t0, t1) for t0, t1, _, _ in pred_intervals],
-            iou_threshold,
-        )
+        das_ann_by_fname = {}
+        for ann in das_coco["annotations"]:
+            fname = das_img_by_id[ann["image_id"]]["file_name"]
+            das_ann_by_fname.setdefault(fname, []).append(ann)
 
-        tp      = len(matched_das_set)             # GT events detected by >=1 prediction
-        fn      = len(das_intervals) - tp
-        pred_tp = len(matched_pred_set)            # predictions overlapping >=1 GT event
-        fp      = len(pred_intervals) - pred_tp    # predictions overlapping no GT
+        per_channel.append({
+            "ch":               ch,
+            "das_img_by_fname": das_img_by_fname,
+            "das_intervals":    das_intervals,
+            "pred_intervals":   pred_intervals,
+            "yolo_by_fname":    {fn: [a["bbox"] for a in anns]
+                                 for fn, anns in das_ann_by_fname.items()},
+        })
 
-        prec = pred_tp / (pred_tp + fp) if (pred_tp + fp) > 0 else float("nan")
-        rec  = tp / (tp + fn) if (tp + fn) > 0 else float("nan")
-        f1   = 2 * prec * rec / (prec + rec) if (prec + rec) > 0 else float("nan")
+    if not per_channel:
+        return rows, examples
 
-        # --- combined evaluation: TP = combined window has ≥1 pred overlap ---
-        pred_time_intervals = [(t0, t1) for t0, t1, _, _ in pred_intervals]
-        combined_tp = sum(
-            1 for ct0, ct1 in combined_intervals_all
-            if any(_iou_1d(ct0, ct1, pt0, pt1) > 0 for pt0, pt1 in pred_time_intervals)
-        )
-        combined_fn = len(combined_intervals_all) - combined_tp
-        combined_rec = combined_tp / len(combined_intervals_all) if combined_intervals_all else float("nan")
+    # ── Combine predictions across channels, then match against GT ──
+    # Delegate to the shared event-level scorer (also used by scripts/evaluation/pr_curves.py).
+    # score_threshold=None → keep all predictions (evaluate.py reports the operating
+    # point as-run; the PR sweep is what varies the threshold).
+    pooled_pred_boxes = [(t0, t1, ann.get("score"))
+                         for pc in per_channel for (t0, t1, _, ann) in pc["pred_intervals"]]
+    res = score_combined(vox_intervals_all, pooled_pred_boxes, iou_threshold)
+    matched_gt, tp_events = res["matched_gt"], res["tp_events"]
+    tp, fn, pred_tp, fp = res["tp"], res["fn"], res["pred_tp"], res["fp"]
+    n_pred, n_boxes = res["n_pred"], res["n_boxes"]
+    prec, rec, f1 = res["precision"], res["recall"], res["f1"]
 
-        print(f"  {session} ch {ch}: GT={len(das_intervals)} pred={len(pred_intervals)} "
-              f"TP={tp} pred_TP={pred_tp} FP={fp} FN={fn} | Recall={rec:.3f} Prec={prec:.3f} F1={f1:.3f} | "
-              f"Combined({len(combined_intervals_all)}): TP={combined_tp} FN={combined_fn} Recall={combined_rec:.3f}")
+    pooled_pred_times = [(t0, t1) for (t0, t1, _) in pooled_pred_boxes]
 
-        rows.append({"session": session, "channel": ch,
-                     "n_gt": len(das_intervals), "n_pred": len(pred_intervals),
-                     "tp": tp, "pred_tp": pred_tp, "fp": fp, "fn": fn,
-                     "recall": rec, "precision": prec, "f1": f1,
-                     "n_combined": len(combined_intervals_all),
-                     "combined_tp": combined_tp, "combined_fn": combined_fn,
-                     "combined_recall": combined_rec})
+    # --- combined-window evaluation: TP = window has ≥1 pooled-pred overlap ---
+    combined_tp = sum(
+        1 for ct0, ct1 in combined_intervals_all
+        if any(_iou_1d(ct0, ct1, pt0, pt1) > 0 for pt0, pt1 in pooled_pred_times)
+    )
+    combined_fn = len(combined_intervals_all) - combined_tp
+    combined_rec = combined_tp / len(combined_intervals_all) if combined_intervals_all else float("nan")
 
-        # --- per-chunk outcome info for coloured rendering ---
+    cov_note = f" (+{n_pred_dropped} pred outside coverage)" if coverage is not None else ""
+    print(f"  {session} [{len(per_channel)}ch combined]: GT={len(vox_intervals_all)} "
+          f"pred={n_pred}ev/{n_boxes}box{cov_note} "
+          f"TP={tp} pred_TP={pred_tp} FP={fp} FN={fn} | Recall={rec:.3f} Prec={prec:.3f} F1={f1:.3f} | "
+          f"Combined({len(combined_intervals_all)}): TP={combined_tp} FN={combined_fn} Recall={combined_rec:.3f}")
+
+    rows.append({"session": session, "channel": "combined",
+                 "n_gt": len(vox_intervals_all), "n_pred": n_pred,
+                 "tp": tp, "pred_tp": pred_tp, "fp": fp, "fn": fn,
+                 "recall": rec, "precision": prec, "f1": f1,
+                 "n_combined": len(combined_intervals_all),
+                 "combined_tp": combined_tp, "combined_fn": combined_fn,
+                 "combined_recall": combined_rec})
+
+    # ── Per-channel chunk tagging for montage rendering (uses combined match) ──
+    # A GT event's TP/FN is the recording-level (combined) verdict, so it renders
+    # the same in every channel — a chunk only lands in the FN pool if the event
+    # was missed everywhere. A prediction's TP/FP is judged against the GT it lands on.
+    for pc in per_channel:
+        ch               = pc["ch"]
+        das_intervals    = pc["das_intervals"]
+        pred_intervals   = pc["pred_intervals"]
+        das_img_by_fname = pc["das_img_by_fname"]
+        yolo_by_fname    = pc["yolo_by_fname"]
+
         chunk_has           = {}  # fname -> set of outcome strings
         chunk_das_tp        = {}  # fname -> [(t0,t1)]  matched DAS events
         chunk_das_fn        = {}  # fname -> [(t0,t1)]  unmatched DAS events
-        chunk_yolo_boxes    = {}  # fname -> [bbox]     all YOLO boxes (neutral ref)
         chunk_pred_tp_polys = {}; chunk_pred_tp_boxes = {}
         chunk_pred_fp_polys = {}; chunk_pred_fp_boxes = {}
 
-        # Tag chunks directly from DAS events — covers ALL events regardless of YOLO
         for i, (t0, t1, fname) in enumerate(das_intervals):
-            if i in matched_das_set:
+            if i in matched_gt:
                 chunk_has.setdefault(fname, set()).add("tp")
                 chunk_das_tp.setdefault(fname, []).append((t0, t1))
             else:
                 chunk_has.setdefault(fname, set()).add("fn")
                 chunk_das_fn.setdefault(fname, []).append((t0, t1))
 
-        # Collect all YOLO boxes per chunk (shown as neutral spatial reference)
-        das_ann_by_fname = {}
-        for ann in das_coco["annotations"]:
-            fname = das_img_by_id[ann["image_id"]]["file_name"]
-            das_ann_by_fname.setdefault(fname, []).append(ann)
-        for fname, anns in das_ann_by_fname.items():
-            chunk_yolo_boxes[fname] = [a["bbox"] for a in anns]
-
-        # Tag chunks from predictions
-        for j, (_, _, fname, ann) in enumerate(pred_intervals):
+        for (pt0, pt1, fname, ann) in pred_intervals:
             polys = ann.get("segmentation", [])
             bbox  = ann["bbox"]
-            if j in matched_pred_set:
+            # Event-level verdict: this box is TP if its merged event overlaps GT
+            # (a box overlaps only its own merged event, and those events are disjoint).
+            is_tp = any(_iou_1d(pt0, pt1, es, ee) > 0 for es, ee in tp_events)
+            if is_tp:
                 chunk_has.setdefault(fname, set()).add("tp")
                 chunk_pred_tp_polys.setdefault(fname, []).extend(polys)
                 if not polys: chunk_pred_tp_boxes.setdefault(fname, []).append(bbox)
@@ -345,7 +320,7 @@ def _evaluate_recording(spec_dir, das_dir, recording_dir, pred_dir, channels, io
                 "img_path":        str(spec_dir / fname),
                 "das_tp":          chunk_das_tp.get(fname, []),
                 "das_fn":          chunk_das_fn.get(fname, []),
-                "yolo_boxes":      chunk_yolo_boxes.get(fname, []),
+                "yolo_boxes":      yolo_by_fname.get(fname, []),
                 "window_start":    im["window_start_sec"],
                 "window_end":      im["window_end_sec"],
                 "img_width":       im["width"],
@@ -434,9 +409,12 @@ out_dir = Path(args.out_dir)
 out_dir.mkdir(parents=True, exist_ok=True)
 
 # GT source switch: --gt-csv → global detections CSV; otherwise per-recording CSVs.
-gt_by_rec = _load_gt_map(args.gt_csv) if args.gt_csv else None
+gt_by_rec, coverage_by_rec = _load_gt_map(args.gt_csv) if args.gt_csv else (None, None)
 if gt_by_rec is not None:
-    print(f"GT: {len(gt_by_rec)} recordings from {args.gt_csv} (is_vocalization=='yes')")
+    n_vox = sum(len(v) for v in gt_by_rec.values())
+    print(f"GT: {n_vox} vocalizations across {len(gt_by_rec)} recordings; "
+          f"{len(coverage_by_rec)} recordings with labeled coverage (FP-evaluable) "
+          f"from {args.gt_csv}")
 
 all_rows     = []
 all_examples = {"tp": [], "fp": [], "fn": []}
@@ -445,7 +423,7 @@ if not args.all:
     session = f"{Path(args.spec_dir).parent.name}/{Path(args.spec_dir).name}"
     rows, examples = _evaluate_recording(
         args.spec_dir, args.das_dir, args.recording_dir, args.pred_dir,
-        channels, iou_threshold, session, gt_by_rec,
+        channels, iou_threshold, session, gt_by_rec, coverage_by_rec,
     )
     all_rows.extend(rows)
     for k in all_examples:
@@ -465,7 +443,8 @@ else:
 
     def _worker(t):
         spec, das, recording, pred, session = t
-        return _evaluate_recording(spec, das, recording, pred, channels, iou_threshold, session, gt_by_rec)
+        return _evaluate_recording(spec, das, recording, pred, channels, iou_threshold, session,
+                                   gt_by_rec, coverage_by_rec)
 
     if args.workers == 1:
         results = []
@@ -509,8 +488,9 @@ print(f"  Combined({all_cn}): TP={all_ctp} FN={all_cfn} | Recall={crec:.3f}")
 print(f"  TP examples pool: {len(all_examples['tp'])}  "
       f"FP: {len(all_examples['fp'])}  FN: {len(all_examples['fn'])}")
 
-# --- write CSV ---
-csv_path = out_dir / "metrics.csv"
+# --- write CSV ---  (name reflects GT source so gt-csv runs don't overwrite the default)
+csv_name = f"metrics_{Path(args.gt_csv).stem}.csv" if args.gt_csv else "metrics.csv"
+csv_path = out_dir / csv_name
 with open(csv_path, "w", newline="") as f:
     writer = csv.DictWriter(f, fieldnames=CSV_FIELDS)
     writer.writeheader()

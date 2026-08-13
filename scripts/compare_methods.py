@@ -2,7 +2,12 @@
 Visualize and compare evaluation metrics across detection methods.
 
 Usage:
-    python scripts/compare_methods.py <eval_base> [--methods ridge,sam3,squeakout] [--out fig.png]
+    python scripts/compare_methods.py <eval_base> [--methods ridge,sam3,squeakout]
+        [--metrics metrics_sampled_contiguous_detections.csv] [--out fig.png]
+
+Reads <eval_base>/<method>/<metrics-csv> for each method. --metrics selects which
+metrics CSV evaluate.py wrote (default metrics.csv; a --gt-csv run produces
+metrics_<gtcsvstem>.csv); it auto-falls back to the lone metrics*.csv in the dir.
 """
 import argparse
 import csv
@@ -15,6 +20,11 @@ parser = argparse.ArgumentParser(description=__doc__,
                                  formatter_class=argparse.RawDescriptionHelpFormatter)
 parser.add_argument("eval_base")
 parser.add_argument("--methods", default="ridge,sam3,squeakout")
+parser.add_argument("--metrics", default="metrics.csv",
+                    help="metrics CSV filename written by evaluate.py inside each method dir. "
+                         "For a --gt-csv run this is metrics_<gtcsvstem>.csv, e.g. "
+                         "metrics_sampled_contiguous_detections.csv. If the exact name is not "
+                         "found, falls back to the single metrics*.csv present in the dir.")
 parser.add_argument("--out",     default="outputs/eval/comparison.png")
 args = parser.parse_args()
 
@@ -66,29 +76,42 @@ def despine(ax):
     ax.spines["right"].set_visible(False)
 
 
+def _resolve_metrics(method_dir):
+    """Locate the metrics CSV in method_dir: prefer --metrics, else the lone metrics*.csv."""
+    exact = method_dir / args.metrics
+    if exact.exists():
+        return exact
+    candidates = sorted(method_dir.glob("metrics*.csv"))
+    if len(candidates) == 1:
+        return candidates[0]
+    if len(candidates) > 1:
+        print(f"WARNING: {method_dir} has multiple metrics CSVs {[c.name for c in candidates]}; "
+              f"pass --metrics to pick one")
+    return None
+
+
 data = {}
 for method in methods:
-    csv_path = eval_base / method / "metrics.csv"
-    if not csv_path.exists():
-        print(f"WARNING: {csv_path} not found — skipping {method}")
+    csv_path = _resolve_metrics(eval_base / method)
+    if csv_path is None:
+        print(f"WARNING: no metrics CSV ({args.metrics}) in {eval_base / method} — skipping {method}")
         continue
     data[method] = load_metrics(csv_path)
 
 if not data:
     raise SystemExit("No metrics found.")
 
-channels = sorted({r["channel"] for rows in data.values() for r in rows})
 sessions = sorted({r["session"] for rows in data.values() for r in rows})
 method_names = list(data.keys())
 n_methods = len(method_names)
 
 # ── layout ────────────────────────────────────────────────────────────────────
-# Single row: grouped bar — overall + per channel (Recall / Precision / F1)
+# evaluate.py pools both channels into a single "combined" event-level metric per
+# recording — there are no per-channel rows any more, so the comparison is one
+# grouped bar: Recall / Precision / F1 for each method (micro-averaged over
+# recordings, error bars = per-recording std).
 
-n_groups  = 1 + len(channels)   # overall + each channel
-
-fig = plt.figure(figsize=(14, 5))
-gs  = fig.add_gridspec(1, n_groups, wspace=0.35)
+fig, ax_overall = plt.subplots(figsize=(7, 5))
 
 colors = plt.cm.tab10(np.linspace(0, 0.3, n_methods))
 metric_labels = ["Recall", "Precision", "F1"]
@@ -121,16 +144,7 @@ def bar_panel(ax, rows_by_method, title):
     despine(ax)
 
 
-# Overall
-ax_overall = fig.add_subplot(gs[0, 0])
-bar_panel(ax_overall, data, "Overall")
-
-# Per channel
-for ci, ch in enumerate(channels):
-    ax = fig.add_subplot(gs[0, ci + 1])
-    ch_data = {m: [r for r in rows if r["channel"] == ch]
-               for m, rows in data.items()}
-    bar_panel(ax, ch_data, f"Channel {ch}")
+bar_panel(ax_overall, data, "Channels combined")
 
 out_path = Path(args.out)
 out_path.parent.mkdir(parents=True, exist_ok=True)

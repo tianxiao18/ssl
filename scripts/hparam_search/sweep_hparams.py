@@ -16,17 +16,17 @@ post-filter SAM3's output masks, so a single cached SAM3 pass is re-scored for
 every value (cheap, no extra GPU work) and only the SAM3 curve is drawn.
 
 Caveat: this is a sensitivity screen around one baseline. It does not capture
-interactions between variables (use scripts/random_search.py for that).
+interactions between variables (use scripts/hparam_search/random_search.py for that).
 
 Requires a GPU (SAM3 inference runs under torch.autocast(cuda)).
 
 Usage
 -----
-    python scripts/sweep_hparams.py <spec_base> <recording_base> <out_dir> \
+    python scripts/hparam_search/sweep_hparams.py <spec_base> <recording_base> <out_dir> \
         --sessions experiment_445/idx_011,experiment_445/idx_012 \
         --sam3-checkpoint sam3/sam3.pt
 
-    python scripts/sweep_hparams.py <spec_base> <recording_base> <out_dir> \
+    python scripts/hparam_search/sweep_hparams.py <spec_base> <recording_base> <out_dir> \
         --n-sessions 4 --sam3-checkpoint sam3/sam3.pt --only threshold_pct,min_mask_cols
 
 Outputs
@@ -45,7 +45,7 @@ import matplotlib
 matplotlib.use("Agg")
 import matplotlib.pyplot as plt
 
-sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
+sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 
 from vox_tracer.sam3_runner import build_processor
 from vox_tracer.sweep_core import (
