@@ -35,6 +35,7 @@ from urllib.parse import parse_qs, urlparse
 from vox_label import setup as setup_mod
 from vox_label.anytime import cs_interval
 from vox_label.exact_grid import GammaCache, exact_grid_interval, f1_from_jaccard
+from vox_label.ranking import corpus_stats, rank
 from vox_label.render import band_rows, clip_channels, to_jpeg
 from vox_label.streams import STREAM_KINDS, counts_at
 
@@ -60,6 +61,9 @@ class LabelService:
         self._gamma = {}
         self._report = {"status": "idle", "at": None, "rows": []}
         self._report_thread = None
+        self._ranking = {"status": "idle", "at": None}
+        self._ranking_thread = None
+        self._corpus = None
 
     # ── labeling ────────────────────────────────────────────────────────────────
 
@@ -232,6 +236,44 @@ class LabelService:
             self._report = {"status": "error", "at": None, "rows": [],
                             "error": traceback.format_exc(limit=3)}
 
+    # ── the partial order of main.pdf: anytime-valid, recomputed as labels arrive ──
+
+    def compute_ranking(self):
+        params = self.c.ranking_params()
+        if params is None:
+            return None
+        if self._corpus is None:
+            self._corpus = corpus_stats(list(self.c.pool.values()), self.c.rules,
+                                        {r: self.c.rule_fn(r) for r in self.c.rules})
+        return rank(self.c.annotations(self.labels), self.c.rules,
+                    {r: self.c.rule_fn(r) for r in self.c.rules}, self._corpus,
+                    params["omega"], params["delta"], self.c.alpha,
+                    params.get("a_star_guess", 0.5))
+
+    def ranking(self, start=False):
+        """Latest ranking; with `start`, recompute in the background if it is stale.
+
+        A pass over every pair takes about a second, too long for the label request.
+        """
+        with self.lock:
+            state = dict(self._ranking)
+            busy = self._ranking_thread is not None and self._ranking_thread.is_alive()
+            n = len(self.labels)
+        if start and not busy and state.get("at") != n:
+            self._ranking = {**state, "status": "computing"}
+            self._ranking_thread = threading.Thread(target=self._run_ranking, args=(n,),
+                                                    daemon=True)
+            self._ranking_thread.start()
+            state["status"] = "computing"
+        return state
+
+    def _run_ranking(self, n):
+        try:
+            self._ranking = {"status": "ready", "at": n, "result": self.compute_ranking()}
+        except Exception:
+            self._ranking = {"status": "error", "at": None,
+                             "error": traceback.format_exc(limit=3)}
+
     # ── crops ───────────────────────────────────────────────────────────────────
 
     def crop_jpeg(self, cand_id, ch):
@@ -293,11 +335,17 @@ class Session:
         self.view_overrides = dict(view_overrides or {})
         self.lock = threading.Lock()
 
-    def bind(self, campaign_dir, dataset=None, view=None, annotator=None, verify=True):
-        """Open a campaign and make it the one being labeled."""
+    def bind(self, campaign_dir, dataset=None, view=None, annotator=None, verify=True,
+             ranking=None):
+        """Open a campaign and make it the one being labeled.
+
+        `ranking` (omega, delta) is frozen into ranking.json only if the campaign has
+        none yet; an existing choice always wins.
+        """
         merged = {**self.view_overrides, **(view or {})}
         campaign, source, dataset, settings = setup_mod.open_campaign(
             campaign_dir, dataset, merged, verify=verify)
+        campaign.freeze_ranking(**(ranking or {}))
         svc = LabelService(
             campaign, source, annotator=annotator or self.annotator,
             pad=float(settings["pad"]), disp_w=int(settings["disp_w"]),
@@ -388,6 +436,9 @@ def make_handler(session):
                 if u.path == "/api/report":
                     start = q.get("start", ["0"])[0] == "1"
                     return self._send(200, svc.report(start=start))
+                if u.path == "/api/ranking":
+                    start = q.get("start", ["0"])[0] == "1"
+                    return self._send(200, svc.ranking(start=start))
                 if u.path == "/api/crop":
                     jpg, a, b = svc.crop_jpeg(q["cand_id"][0], q["ch"][0])
                     return self._send(200, jpg, "image/jpeg",
@@ -399,6 +450,7 @@ def make_handler(session):
                         "rules": svc.c.rules,
                         "n_candidates": svc.c.spec["n_candidates"],
                         "alpha": svc.c.alpha,
+                        "ranking": svc.c.ranking_params(),
                         "annotator": svc.annotator,
                     })
                 return self._send(404, {"error": "not found"})
@@ -416,7 +468,7 @@ def make_handler(session):
             try:
                 if u.path == "/api/setup/plan":
                     keys = ("rules", "n_max", "J", "alpha", "alpha_per_rule",
-                            "recall_stream_max", "p_real")
+                            "recall_stream_max", "p_real", "omega", "delta")
                     return self._send(200, setup_mod.plan(
                         payload["pool_csv"], payload["detectors"],
                         **{k: payload[k] for k in keys if payload.get(k) is not None}))
@@ -447,6 +499,7 @@ def _start(session, payload):
     """Handle /api/setup/start: freeze a new campaign if asked, then bind one."""
     view = payload.get("view") or {}
     dataset = payload.get("dataset")
+    ranking = {k: payload[k] for k in ("omega", "delta") if payload.get(k) is not None}
     if payload.get("mode") == "create":
         path, _ = setup_mod.freeze(
             payload["out_dir"], payload["pool_csv"], payload["detectors"], dataset,
@@ -456,7 +509,7 @@ def _start(session, payload):
     else:
         campaign_dir = payload["campaign_dir"]
     session.bind(campaign_dir, dataset=dataset, view=view,
-                 annotator=payload.get("annotator"))
+                 annotator=payload.get("annotator"), ranking=ranking)
     return session.status()
 
 

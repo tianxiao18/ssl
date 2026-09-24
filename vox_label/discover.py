@@ -132,6 +132,31 @@ def datasets(png_root=PNG_ROOT, h5_root=H5_ROOT, data_root=DATA_ROOT):
     return out
 
 
+def pool_clips(pool_csv, limit=50):
+    """A few distinct clip ids from a pool, enough to tell which corpus it came from."""
+    clips = []
+    try:
+        with open(pool_csv, newline="") as fh:
+            for row in csv.DictReader(fh):
+                if row["clip"] not in clips:
+                    clips.append(row["clip"])
+                    if len(clips) >= limit:
+                        break
+    except (OSError, KeyError):
+        pass
+    return clips
+
+
+def pool_datasets(pool_csv, names, png_root=PNG_ROOT, h5_root=H5_ROOT):
+    """Datasets whose spectrograms contain every sampled clip of this pool."""
+    clips = pool_clips(pool_csv)
+    if not clips:
+        return []
+    return [n for n in names
+            if all((Path(png_root) / n / c).exists() or (Path(h5_root) / n / c).exists()
+                   or any((Path(h5_root) / n).glob(f"{c}*")) for c in clips)]
+
+
 def pool_detectors(pool_csv):
     """Detector names in pool order, from the z_* columns of a frozen pool."""
     try:
@@ -212,6 +237,12 @@ def campaigns(root=CAMPAIGN_ROOT, known_datasets=None):
             continue
         n_labeled = count_labels(d / "labels.jsonl")
         n_max = spec.get("n_max", 0)
+        ranking = spec.get("ranking")
+        if ranking is None and (d / "ranking.json").exists():
+            try:
+                ranking = json.loads((d / "ranking.json").read_text())
+            except (OSError, json.JSONDecodeError):
+                ranking = None
         out.append({
             "dir": d.as_posix(),
             "name": spec.get("name", d.name),
@@ -230,5 +261,6 @@ def campaigns(root=CAMPAIGN_ROOT, known_datasets=None):
             "pool_csv": spec.get("pool_csv"),
             "pool_exists": bool(spec.get("pool_csv")) and Path(spec["pool_csv"]).exists(),
             "pct": round(100 * n_labeled / n_max, 1) if n_max else None,
+            "ranking": ranking,
         })
     return sorted(out, key=lambda r: -r["n_labeled"])

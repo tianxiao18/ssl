@@ -14,6 +14,7 @@ from vox_label import discover
 from vox_label.campaign import Campaign, create
 from vox_label.candidates import load_pool
 from vox_label.exact_grid import c_of_j, even_grid, half_width, plan_n
+from vox_label.ranking import corpus_stats, denominator, plan_pair
 from vox_label.render import make_source
 from vox_label.rules import accept_fraction, default_rules, resolve
 
@@ -39,6 +40,8 @@ GRID_DEFAULTS = {
     "alpha_per_rule": False,
     "seed": 20260911,
     "recall_stream_max": None,
+    "omega": 0.5,
+    "delta": 0.01,
 }
 
 TOLERANCES = [0.02, 0.03, 0.04, 0.05]
@@ -81,10 +84,13 @@ def options(view_overrides=None):
     """Everything the setup page needs to render its form."""
     ds = discover.datasets()
     known = [d["name"] for d in ds]
+    pools = discover.pools()
+    for p in pools:
+        p["datasets"] = discover.pool_datasets(p["path"], known)
     return {
         "datasets": ds,
         "campaigns": discover.campaigns(known_datasets=known),
-        "pools": discover.pools(),
+        "pools": pools,
         "grid_defaults": dict(GRID_DEFAULTS),
         "view_defaults": {d["name"]: view_for(d, view_overrides) for d in ds},
         "tolerances": TOLERANCES,
@@ -98,7 +104,8 @@ def _validated_rules(rules, detectors):
 
 
 def plan(pool_csv, detectors, rules=None, n_max=6000, J=12, alpha=0.05,
-         alpha_per_rule=False, recall_stream_max=None, p_real=None):
+         alpha_per_rule=False, recall_stream_max=None, p_real=None, omega=0.5,
+         delta=0.01, a_star_guess=0.5):
     """What a grid would buy, without writing anything.
 
     The same numbers `make_campaign.py --plan-only` prints: the committed checkpoints,
@@ -133,7 +140,21 @@ def plan(pool_csv, detectors, rules=None, n_max=6000, J=12, alpha=0.05,
     budget = [{"f": f, "n": [round(plan_n(0.25, f, t, J)) for t in TOLERANCES]}
               for f in fractions if f > 0]
 
+    # Eq. 56 per pair: annotations for 80% power to separate a gap of delta.
+    fns = {r: resolve(r, detectors) for r in rules}
+    corpus = corpus_stats(rows, rules, fns)
+    n_pairs = max(len(corpus["patterns"]), 1)
+    pairs = []
+    for (j, k), pat in corpus["patterns"].items():
+        p_dis = pat[(1, 0)] + pat[(0, 1)]
+        d = [denominator(corpus["a_r"][r], a_star_guess, omega) for r in (j, k)]
+        pairs.append({"a": j, "b": k, "p_dis": round(p_dis, 4),
+                      "n": plan_pair(p_dis, *d, delta, omega, alpha / n_pairs)})
+
     return {
+        "omega": omega,
+        "delta": delta,
+        "pairs": pairs,
         "n_candidates": len(rows),
         "detectors": detectors,
         "rules": rules,
@@ -159,6 +180,11 @@ def freeze(out_dir, pool_csv, detectors, dataset, rules=None, **grid):
                              detectors)
     if not Path(pool_csv).exists():
         raise FileNotFoundError(f"pool {pool_csv} does not exist")
+    matches = discover.pool_datasets(pool_csv, [d["name"] for d in discover.datasets()])
+    if dataset not in matches:
+        raise ValueError(
+            f"pool {pool_csv} holds clips from {matches or 'no known dataset'}, not "
+            f"{dataset}: the annotator would get no spectrograms.")
     pool_dets = discover.pool_detectors(pool_csv)
     unknown = [d for d in detectors if d not in pool_dets]
     if unknown:

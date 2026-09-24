@@ -36,7 +36,8 @@ from vox_label.rules import accept_fraction, default_rules, resolve
 
 
 def create(out_dir, pool_csv, detectors, rules=None, alpha=0.05, n_max=6000, J=12,
-           seed=20260911, recall_stream_max=None, alpha_per_rule=False, dataset=None):
+           seed=20260911, recall_stream_max=None, alpha_per_rule=False, dataset=None,
+           omega=0.5, delta=0.01, a_star_guess=0.5):
     """Write campaign.json once. Refuses to overwrite an existing spec."""
     out_dir = Path(out_dir)
     spec_path = out_dir / "campaign.json"
@@ -89,11 +90,23 @@ def create(out_dir, pool_csv, detectors, rules=None, alpha=0.05, n_max=6000, J=1
         "recall_stream_max": recall_max,
         "f_v": f_v,
         "grids": grids,
+        # The anytime-valid ranking of main.pdf. omega and delta are part of the
+        # hypothesis, so they are frozen with everything else.
+        "ranking": ranking_spec(omega, delta, a_star_guess),
         "order": order,
     }
     out_dir.mkdir(parents=True, exist_ok=True)
     spec_path.write_text(json.dumps(spec, indent=1))
     return spec_path, spec
+
+
+def ranking_spec(omega=0.5, delta=0.01, a_star_guess=0.5):
+    if not 0.0 <= float(omega) <= 1.0:
+        raise ValueError(f"omega must be in [0, 1], got {omega}")
+    if not 0.0 <= float(delta) < 1.0:
+        raise ValueError(f"delta must be in [0, 1), got {delta}")
+    return {"omega": float(omega), "delta": float(delta),
+            "a_star_guess": float(a_star_guess)}
 
 
 class Campaign:
@@ -137,6 +150,32 @@ class Campaign:
 
     def save_view(self, view):
         self.view_path.write_text(json.dumps(view, indent=1))
+
+    # Specs frozen before the ranking existed get it from a write-once sidecar.
+    ranking_path = property(lambda self: self.dir / "ranking.json")
+
+    def ranking_params(self):
+        if "ranking" in self.spec:
+            return self.spec["ranking"]
+        try:
+            return json.loads(self.ranking_path.read_text())
+        except (OSError, json.JSONDecodeError):
+            return None
+
+    def freeze_ranking(self, omega=0.5, delta=0.01, a_star_guess=0.5):
+        """Return the frozen ranking params, writing ranking.json only if none exist.
+
+        Records how many labels existed at the time, since choosing omega after
+        watching scores is itself a choice made on the data.
+        """
+        current = self.ranking_params()
+        if current is not None:
+            return current
+        params = {**ranking_spec(omega, delta, a_star_guess),
+                  "n_labeled_at_freeze": len(self.load_labels())}
+        with open(self.ranking_path, "x") as fh:
+            fh.write(json.dumps(params, indent=1))
+        return params
 
     def rule_fn(self, name):
         return self._rule_fns[name]

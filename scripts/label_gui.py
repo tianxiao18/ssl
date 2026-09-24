@@ -52,6 +52,11 @@ def main():
                          "to make each panel shorter and the calls larger")
     ap.add_argument("--nyquist-khz", type=float, default=None,
                     help="sr/2 of the source audio; read from the data when not given")
+    ap.add_argument("--omega", type=float, default=None,
+                    help="S_omega dial for the ranking; frozen on first bind, ignored "
+                         "if the campaign already has one")
+    ap.add_argument("--delta", type=float, default=None,
+                    help="ranking resolution; frozen alongside omega")
     ap.add_argument("--host", default="127.0.0.1")
     ap.add_argument("--port", type=int, default=8765)
     args = ap.parse_args()
@@ -62,7 +67,9 @@ def main():
     session = Session(annotator=args.annotator,
                       view_overrides={k: v for k, v in view.items() if v is not None})
     if args.campaign:
-        session.bind(args.campaign, dataset=args.dataset)
+        ranking = {k: getattr(args, k) for k in ("omega", "delta")
+                   if getattr(args, k) is not None}
+        session.bind(args.campaign, dataset=args.dataset, ranking=ranking)
     serve(session, args.host, args.port)
 
 

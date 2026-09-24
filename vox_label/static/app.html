@@ -103,6 +103,22 @@
   .fig .axis{display:grid;grid-template-columns:62px 1fr;gap:7px;margin-top:4px}
   .fig .axis div{display:flex;justify-content:space-between;font-size:9.5px;
                  color:var(--dim);font-weight:400}
+  .rk{font-size:11.5px;padding:4px 11px 8px;border-bottom:1px solid var(--line)}
+  .rk .hd{color:var(--dim);font-size:10.5px;margin:6px 0 3px}
+  .rk .pr{display:grid;grid-template-columns:1fr auto;gap:8px;padding:1px 0;
+          font-variant-numeric:tabular-nums}
+  .rk .pr .g{color:var(--dim);font-size:10.5px}
+  .rk .rel{font-weight:600;color:var(--real);padding:0 4px}
+  .rk .open .rel{color:var(--dim)}
+  .rk .stale{color:var(--dim);font-size:10.5px}
+  /* Rank column: tiers as a number, repeated for ties. */
+  .rk td.rank{color:var(--dim);text-align:right;padding-right:2px;width:1.5em}
+  .rk tr.lbl td{padding:6px 7px 1px;color:var(--dim);font-size:10px}
+  .rk tr.pick{cursor:pointer}
+  .rk tr.pick:hover td{background:#20232e}
+  .rk tr.pick.on td{background:#262a38}
+  .rk tr.pick.on td:nth-child(2){color:var(--real);font-weight:600}
+  .rk .tog{float:right;cursor:pointer;color:var(--real);user-select:none}
   .err{color:var(--fake);white-space:pre-wrap;font-family:ui-monospace,monospace;font-size:11.5px}
 </style>
 
@@ -123,7 +139,7 @@
   </div>
   <div class="right">
     <h2>live scores, anytime-valid</h2>
-    <div class="scroll"><table id="live"><thead><tr>
+    <div class="scroll"><div class="rk" id="ranking"></div><table id="live"><thead><tr>
       <th>rule</th><th>n</th><th>est</th><th>interval</th><th></th>
     </tr></thead><tbody></tbody></table></div>
   </div>
@@ -158,6 +174,7 @@ function render(d) {
   $('#ndone').textContent = d.n_labeled ?? 0;
   $('#tonext').textContent = d.to_next_reveal ?? '?';
   refreshLive();
+  refreshRanking();
 
   if (d.done) {
     $('#meta').textContent = '';
@@ -212,6 +229,145 @@ async function refreshLive() {
   }
   tb.innerHTML = html;
 }
+
+// ── the partial order (main.pdf), recomputed in the background ───────────────
+
+const REL = {succ_delta: '\u227b\u03b4', approx: '\u2248\u03b4', succ: '\u227b',
+             unresolved: '\u22c8'};
+const pts = v => v == null ? '?' : (100 * v).toFixed(1);
+let rankTimer = null;
+
+async function refreshRanking() {
+  clearTimeout(rankTimer);
+  const d = await (await api('/api/ranking?start=1')).json();
+  if (d.status === 'error') { $('#ranking').innerHTML = `<div class="err">${d.error}</div>`; return; }
+  if (d.result) drawRanking(d.result, d.status === 'computing' || d.at !== (cur && cur.n_labeled));
+  if (d.status === 'computing') rankTimer = setTimeout(refreshRanking, 1000);
+}
+
+// Tiers from settled "better" verdicts (and chains of them). A boundary between tiers
+// is kept only if everything above it beats everything below it, so a tier gap never
+// claims an unsettled pair. A cycle means some verdict is wrong: it and everything
+// below it are 'conflict'.
+function tiers(r) {
+  const names = r.rules.map(x => x.rule);
+  const above = {};
+  for (const x of names) above[x] = new Set();
+  for (const p of r.pairs) {
+    if (p.relation !== 'succ' && p.relation !== 'succ_delta') continue;
+    const [w, l] = p.winner === 'k' ? [p.b, p.a] : [p.a, p.b];
+    above[l].add(w);
+  }
+  // Transitive closure: above[x] = every rule shown, directly or by a chain, to beat x.
+  for (let grew = true; grew;) {
+    grew = false;
+    for (const x of names)
+      for (const w of [...above[x]])
+        for (const v of above[w]) if (!above[x].has(v)) { above[x].add(v); grew = true; }
+  }
+  // A rule with no settled "better" verdict either way would sit on top and block
+  // every boundary, so it is set aside. If that is every rule, there is one group.
+  const loose = names.filter(x => !above[x].size && !names.some(y => above[y].has(x)));
+  const tier = {};
+  if (loose.length === names.length) { for (const x of names) tier[x] = 1; return tier; }
+  for (const x of loose) tier[x] = 'unranked';
+  // Layers: peel off the rules nothing remaining beats.
+  const layers = [];
+  let left = names.filter(x => !loose.includes(x));
+  while (left.length) {
+    const top = left.filter(x => ![...above[x]].some(w => left.includes(w)));
+    if (!top.length) break;
+    layers.push(top);
+    left = left.filter(x => !top.includes(x));
+  }
+  // Keep a boundary only if it is fully backed; otherwise merge across it.
+  for (const x of left) tier[x] = 'conflict';
+  let k = 1;
+  layers.forEach((layer, i) => {
+    if (i > 0) {
+      const hi = layers.slice(0, i).flat(), lo = layers.slice(i).flat();
+      if (lo.every(y => hi.every(x => above[y].has(x)))) k++;
+    }
+    for (const x of layer) tier[x] = k;
+  });
+  return tier;
+}
+
+// Pairwise panel: one detector against the rest. Defaults to the best-ranked one;
+// clicking a rule in the list focuses it. The full list sits behind a toggle.
+const REL_LOSE = {succ_delta: '≺δ', succ: '≺'};
+let focusRule = null, showAll = false, lastRank = null;
+
+function pairNote(p, flip) {
+  const [glo, ghi] = flip ? [-p.gap_hi, -p.gap_lo] : [p.gap_lo, p.gap_hi];
+  let note = `gap ${pts(glo)} to ${pts(ghi)}`;
+  const f = p.forecast;
+  if (f) note += f.reliable ? `, ~${Math.round(f.remaining).toLocaleString()} more`
+                            : `, forecast after n>${Math.round(8 * f.n0_y)}`;
+  return note;
+}
+
+function pairRow(left, sym, right, p, flip) {
+  const done = p.relation === 'succ_delta' || p.relation === 'approx';
+  return `<div class="pr${done ? '' : ' open'}"><span>${left}<span class="rel">${sym}</span>${right}</span>` +
+         `<span class="g">${pairNote(p, flip)}</span></div>`;
+}
+
+// Winner on the left, as the pair was decided.
+function anyPair(p) {
+  const flip = p.winner === 'k';
+  return pairRow(flip ? p.b : p.a, REL[p.relation], flip ? p.a : p.b, p, flip);
+}
+
+// Focused rule always on the left; the symbol turns round when it is the loser.
+function focusPair(p, f) {
+  const flip = p.b === f;
+  const other = flip ? p.a : p.b;
+  const lost = p.winner != null && (p.winner === 'k') !== flip;
+  const sym = lost ? REL_LOSE[p.relation] : REL[p.relation];
+  return pairRow(f, sym, other, p, flip);
+}
+
+function drawRanking(r, stale) {
+  lastRank = {r, stale};
+  const tier = tiers(r);
+  const t = x => ({unranked: 1e6, conflict: 1e6 + 1})[tier[x.rule]] ?? tier[x.rule];
+  const rules = [...r.rules].sort((a, b) => t(a) - t(b) || (b.estimate ?? -1) - (a.estimate ?? -1));
+  if (!rules.some(x => x.rule === focusRule)) focusRule = null;
+  const f = focusRule ?? rules[0].rule;
+  const pos = Object.fromEntries(rules.map((x, i) => [x.rule, i]));
+  const bar = x => x.lo == null ? '' :
+    `<div class="bar"><i style="left:${100 * x.lo}%;width:${100 * (x.hi - x.lo)}%"></i>` +
+    (x.estimate == null ? '' : `<u style="left:${100 * x.estimate}%"></u>`) + `</div>`;
+  const order = ['succ_delta', 'approx', 'succ', 'unresolved'];
+  const list = showAll
+    ? [...r.pairs].sort((a, b) => order.indexOf(a.relation) - order.indexOf(b.relation)).map(anyPair)
+    : r.pairs.filter(p => p.a === f || p.b === f)
+        .sort((a, b) => pos[a.a === f ? a.b : a.a] - pos[b.a === f ? b.b : b.a])
+        .map(p => focusPair(p, f));
+  $('#ranking').innerHTML =
+    `<div class="hd">S<sub>ω</sub> at ω=${r.omega}, δ=${r.delta}, n=${r.n}` +
+    `${stale ? ' <span class="stale">(updating)</span>' : ''}</div>` +
+    `<table>${rules.map((x, i) => {
+      const k = tier[x.rule], named = typeof k === 'string';
+      const head = named && (i === 0 || t(rules[i - 1]) !== t(x))
+        ? `<tr class="lbl"><td colspan="5">${k === 'conflict' ? 'conflicting verdicts' : 'unranked'}</td></tr>` : '';
+      return head + `<tr data-rule="${x.rule}" class="pick${x.rule === f ? ' on' : ''}">` +
+        `<td class="rank">${named ? '–' : k}</td><td>${x.rule}</td><td>${pct(x.estimate)}</td>` +
+        `<td>${pct(x.lo)}–${pct(x.hi)}</td><td>${bar(x)}</td></tr>`;
+    }).join('')}</table>` +
+    `<div class="hd">pairwise, simultaneous at α=${r.alpha}` +
+    `<span class="tog" data-toggle="1">${showAll ? f : 'all pairs'}</span></div>` +
+    list.join('');
+}
+
+$('#ranking').addEventListener('click', e => {
+  const row = e.target.closest('tr[data-rule]');
+  if (row) { focusRule = row.dataset.rule; showAll = false; }
+  else if (e.target.closest('[data-toggle]')) showAll = !showAll;
+  else return;
+  if (lastRank) drawRanking(lastRank.r, lastRank.stale);
+});
 
 async function submit(label) {
   if (busy || !cur || cur.done) return;
