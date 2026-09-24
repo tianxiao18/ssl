@@ -1,4 +1,4 @@
-"""SqueakOut inference over pre-generated spectrogram PNGs."""
+"""SqueakOut inference over pre-generated spectrograms (PNG or HDF5)."""
 import sys
 from pathlib import Path
 
@@ -9,7 +9,7 @@ import torch
 from vox_tracer.coco import image_entry, make_coco, mask_to_polygons, poly_annotation, save_coco_per_channel
 from vox_tracer.paths import recording_dir_from_spec_dir
 from vox_tracer.ridge import detection_spectral_features, passes_mask_filters
-from vox_tracer.spec import group_specs_by_channel, load_channel_audio
+from vox_tracer.spec import WindowReader, load_channel_audio, spec_windows_by_channel, window_fname
 
 INFERENCE_BATCH_SIZE = 16
 
@@ -31,24 +31,37 @@ def clean_mask(mask, min_area_ratio=0.1, min_component=100, min_total=300):
     return clean
 
 
-def _run_batch(paths, model, device, batch_size=INFERENCE_BATCH_SIZE, mask_threshold=None):
-    from squeakout.data import DEFAULT_IMAGE_SIZE, load_spectrogram_tensor
+def _iter_inference(entries, read_window, model, device, batch_size=INFERENCE_BATCH_SIZE,
+                    mask_threshold=None):
+    """Yield ((source, t0, t1), gray, binary_mask, prob_map) per window, in batches.
+
+    Masks/probs are at model resolution; gray is the source window.
+    """
+    from PIL import Image
+    from squeakout.data import DEFAULT_IMAGE_SIZE, RESAMPLING_LANCZOS
     from squeakout.inference import DEFAULT_MASK_THRESHOLD, logits_to_mask
 
     thr = DEFAULT_MASK_THRESHOLD if mask_threshold is None else mask_threshold
-    out = []   # (binary_mask, prob_map) per image, both at model resolution
     with torch.inference_mode():
-        for i in range(0, len(paths), batch_size):
-            batch = paths[i:i + batch_size]
-            tensors = torch.stack(
-                [load_spectrogram_tensor(p, DEFAULT_IMAGE_SIZE) for p in batch]
-            ).to(device)
+        for i in range(0, len(entries), batch_size):
+            batch, grays = [], []
+            for e in entries[i:i + batch_size]:
+                gray = read_window(*e)
+                if gray is not None and gray.size:
+                    batch.append(e)
+                    grays.append(gray)
+            if not batch:
+                continue
+            # same resize as squeakout.data.load_spectrogram_tensor, from an array
+            tensors = torch.stack([
+                torch.from_numpy(np.asarray(Image.fromarray(g).resize(DEFAULT_IMAGE_SIZE, RESAMPLING_LANCZOS),
+                                            dtype=np.float32) / 255.0).unsqueeze(0)
+                for g in grays
+            ]).to(device)
             logits = model(tensors)
             probs  = torch.sigmoid(logits.detach())
-            for l, p in zip(logits, probs):
-                out.append((logits_to_mask(l, threshold=thr),
-                            p.squeeze().float().cpu().numpy()))
-    return out
+            for e, g, l, p in zip(batch, grays, logits, probs):
+                yield e, g, logits_to_mask(l, threshold=thr), p.squeeze().float().cpu().numpy()
 
 
 def run_squeakout(spec_dir, out_dir, channels=None, checkpoint=None,
@@ -56,8 +69,8 @@ def run_squeakout(spec_dir, out_dir, channels=None, checkpoint=None,
                   overwrite=False,
                   max_mask_area_frac=0.15, min_freq_sweep_frac=0.0, min_mask_cols=9,
                   min_centroid_hz=25000.0, max_flatness=None, recording_dir=None,
-                  prefix="headmic"):
-    """Run SqueakOut on pre-generated spectrogram PNGs; write coco_ch_{ch}.json per channel.
+                  prefix="headmic", chunk_sec=1.0):
+    """Run SqueakOut on pre-generated spectrograms (PNGs, or HDF5 at chunk_sec); write coco_ch_{ch}.json per channel.
 
     Each detection stores a ``score`` = its mean mask-probability, so
     scripts/evaluation/pr_curves.py can sweep a detection threshold post-hoc. Lower
@@ -83,7 +96,7 @@ def run_squeakout(spec_dir, out_dir, channels=None, checkpoint=None,
     if recording_dir is None:
         recording_dir = recording_dir_from_spec_dir(spec_dir)
 
-    by_ch = group_specs_by_channel(spec_dir, channels, prefix=prefix)
+    by_ch = spec_windows_by_channel(spec_dir, channels, prefix=prefix, chunk_sec=chunk_sec)
     pending = {ch: entries for ch, entries in by_ch.items()
                if overwrite or not (out_dir / f"coco_ch_{ch}.json").exists()}
     if not pending:
@@ -98,11 +111,9 @@ def run_squeakout(spec_dir, out_dir, channels=None, checkpoint=None,
     model.eval()
 
     coco_by_ch = {}
+    read_window = WindowReader()
 
     for ch, entries in pending.items():
-        paths   = [e[0] for e in entries]
-        results = _run_batch(paths, model, device, batch_size, mask_threshold)  # [(mask, prob)]
-
         loaded = load_channel_audio(recording_dir, ch, prefix=prefix)
         sr, audio = (loaded[0], loaded[1]) if loaded is not None else (None, None)
         nyquist = (sr / 2.0) if audio is not None else None
@@ -110,13 +121,14 @@ def run_squeakout(spec_dir, out_dir, channels=None, checkpoint=None,
             print(f"  squeakout ch{ch}: no audio in {recording_dir} -> spectral gates skipped")
 
         coco = make_coco(f"SqueakOut detections — ch {ch}", "squeakout")
-        for (path, t0, t1), (raw_mask, prob) in zip(entries, results):
-            gray = cv2.imread(str(path), cv2.IMREAD_GRAYSCALE)
+        for (path, t0, t1), gray, raw_mask, prob in _iter_inference(
+                entries, read_window, model, device, batch_size, mask_threshold):
             H, W = gray.shape
             nyq  = nyquist if nyquist is not None else (sr / 2.0 if sr else 62500.0)
             iid  = len(coco["images"])
             coco["images"].append(
-                image_entry(iid, path.name, W, H, window_start_sec=t0, window_end_sec=t1)
+                image_entry(iid, window_fname(path, t0, t1, chunk_sec), W, H,
+                            window_start_sec=t0, window_end_sec=t1)
             )
             # Score each surviving component by its mean mask-probability (prob and
             # the cleaned mask share the model-resolution grid).
@@ -148,5 +160,6 @@ def run_squeakout(spec_dir, out_dir, channels=None, checkpoint=None,
                                                "flatness": flatness})
                     )
         coco_by_ch[ch] = coco
+    read_window.close()
 
     save_coco_per_channel(coco_by_ch, out_dir)

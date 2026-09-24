@@ -15,7 +15,7 @@ Outputs
 Single recording:
     python scripts/evaluate.py <spec_dir> <das_dir> <recording_dir> <pred_dir> <out_dir> [options]
 
-All recordings (mirrors experiment_*/idx_* structure):
+All recordings (any layout depth -- experiment_*/idx_*, flat, or nested cohorts):
     python scripts/evaluate.py <spec_base> <das_base> <recording_base> <pred_base> <out_base> --all [--workers 4]
 
 Examples
@@ -44,6 +44,7 @@ import argparse
 import csv
 import json
 import math
+import os
 import random
 import sys
 from concurrent.futures import ProcessPoolExecutor, as_completed
@@ -51,6 +52,7 @@ from glob import glob
 from pathlib import Path
 
 import pandas as pd
+from tqdm import tqdm
 
 import cv2
 import numpy as np
@@ -99,6 +101,14 @@ args = parser.parse_args()
 channels      = [int(c) for c in args.channels.split(",")]
 iou_threshold = args.iou_threshold
 random.seed(args.seed)
+
+# The per-chunk `examples` pools exist only to render montage pages, and each one
+# retains the SAM3 polygon segmentation for every chunk of the recording (~12 MB
+# per recording, measured on dryad_gerbil_full).  The parent never frees them, so
+# across a large corpus that is tens of GB of dead weight whenever no montage was
+# asked for -- enough to OOM the process before the CSV is written.  Build them
+# only when they will actually be consumed.
+COLLECT_EXAMPLES = args.montage_samples > 0
 
 CSV_FIELDS = ["session", "channel", "n_gt", "n_pred", "tp", "pred_tp", "fp", "fn",
               "recall", "precision", "f1",
@@ -151,14 +161,12 @@ def _evaluate_recording(spec_dir, das_dir, recording_dir, pred_dir, channels, io
         # this recording were blank/unlabeled, so we can't judge anything: skip.
         coverage = coverage_by_rec.get(session) if coverage_by_rec is not None else None
         if coverage is None:
-            print(f"  {session}: no labeled coverage in CSV, skipping")
             return rows, examples
     else:
         coverage = None  # per-recording GT covers the whole recording — no filtering
         try:
             vox_intervals_all, combined_intervals_all = _load_gt_from_csv(recording_dir)
-        except FileNotFoundError as e:
-            print(f"  {session}: {e}, skipping")
+        except FileNotFoundError:
             return rows, examples
 
     # ── Pass 1: gather per-channel GT-chunk mapping, YOLO boxes, and predictions ──
@@ -167,13 +175,11 @@ def _evaluate_recording(spec_dir, das_dir, recording_dir, pred_dir, channels, io
     # So detection must be judged across channels combined, not per channel: an
     # event detected in ch118 but not ch35 is a true positive, not a ch35 FN.
     per_channel = []
-    n_pred_dropped = 0
     for ch in channels:
         das_path  = das_dir  / f"coco_ch_{ch}.json"
         pred_path = pred_dir / f"coco_ch_{ch}.json"
 
         if not pred_path.exists():
-            print(f"  {session} ch {ch}: pred not found, skipping")
             continue
 
         pred_coco = _load_coco(pred_path)
@@ -214,7 +220,6 @@ def _evaluate_recording(spec_dir, das_dir, recording_dir, pred_dir, channels, io
             # In coverage mode, ignore predictions outside the GT-complete span so
             # they can't be counted as (untrustworthy) FP.
             if coverage is not None and not (coverage[0] <= (t0 + t1) / 2 <= coverage[1]):
-                n_pred_dropped += 1
                 continue
             pred_intervals.append((t0, t1, fname, ann))
 
@@ -257,12 +262,6 @@ def _evaluate_recording(spec_dir, das_dir, recording_dir, pred_dir, channels, io
     combined_fn = len(combined_intervals_all) - combined_tp
     combined_rec = combined_tp / len(combined_intervals_all) if combined_intervals_all else float("nan")
 
-    cov_note = f" (+{n_pred_dropped} pred outside coverage)" if coverage is not None else ""
-    print(f"  {session} [{len(per_channel)}ch combined]: GT={len(vox_intervals_all)} "
-          f"pred={n_pred}ev/{n_boxes}box{cov_note} "
-          f"TP={tp} pred_TP={pred_tp} FP={fp} FN={fn} | Recall={rec:.3f} Prec={prec:.3f} F1={f1:.3f} | "
-          f"Combined({len(combined_intervals_all)}): TP={combined_tp} FN={combined_fn} Recall={combined_rec:.3f}")
-
     rows.append({"session": session, "channel": "combined",
                  "n_gt": len(vox_intervals_all), "n_pred": n_pred,
                  "tp": tp, "pred_tp": pred_tp, "fp": fp, "fn": fn,
@@ -270,6 +269,11 @@ def _evaluate_recording(spec_dir, das_dir, recording_dir, pred_dir, channels, io
                  "n_combined": len(combined_intervals_all),
                  "combined_tp": combined_tp, "combined_fn": combined_fn,
                  "combined_recall": combined_rec})
+
+    # Everything scored is already in `rows`; what follows only tags chunks for
+    # montage rendering, so with COLLECT_EXAMPLES off we are done here.
+    if not COLLECT_EXAMPLES:
+        return rows, examples
 
     # ── Per-channel chunk tagging for montage rendering (uses combined match) ──
     # A GT event's TP/FN is the recording-level (combined) verdict, so it renders
@@ -398,9 +402,19 @@ def _write_montage(examples, n, out_dir, prefix, cols, label_strip):
 
 
 def _discover(base):
-    for exp_dir in sorted(Path(base).glob("experiment_*")):
-        for idx_dir in sorted(exp_dir.glob("idx_*")):
-            yield Path(exp_dir.name) / idx_dir.name, idx_dir
+    """Yield (rel_path, leaf_dir) for every recording under base, regardless of
+    layout depth -- experiment_*/idx_* (gerbil_ssl, gerbil_family), a flat
+    <recording> layout (dryad_gerbil), or a nested cohort layout
+    (dryad_gerbil_full: cohortN_formatted/<recording>). A recording is any
+    directory with no subdirectories of its own.
+    """
+    base = Path(base)
+    for dirpath, dirnames, filenames in os.walk(base):
+        dirnames.sort()
+        if dirnames or not filenames:
+            continue
+        leaf = Path(dirpath)
+        yield leaf.relative_to(base), leaf
 
 
 # ── main ─────────────────────────────────────────────────────────────────────
@@ -439,7 +453,6 @@ else:
         (str(idx_dir), str(das_base / rel), str(recording_base / rel), str(pred_base / rel), str(rel))
         for rel, idx_dir in _discover(spec_base)
     ]
-    print(f"Found {len(tasks)} recordings, {args.workers} worker(s) …")
 
     def _worker(t):
         spec, das, recording, pred, session = t
@@ -448,20 +461,20 @@ else:
 
     if args.workers == 1:
         results = []
-        for t in tasks:
+        for t in tqdm(tasks, desc="evaluating", unit="rec"):
             try:
                 results.append(_worker(t))
             except Exception as e:
-                print(f"ERROR {t[0]}: {e}")
+                tqdm.write(f"ERROR {t[0]}: {e}")
     else:
         results = []
         with ProcessPoolExecutor(max_workers=args.workers) as pool:
             futures = {pool.submit(_worker, t): t for t in tasks}
-            for fut in as_completed(futures):
+            for fut in tqdm(as_completed(futures), total=len(futures), desc="evaluating", unit="rec"):
                 try:
                     results.append(fut.result())
                 except Exception as e:
-                    print(f"ERROR {futures[fut][0]}: {e}")
+                    tqdm.write(f"ERROR {futures[fut][0]}: {e}")
 
     for rows, examples in results:
         all_rows.extend(rows)

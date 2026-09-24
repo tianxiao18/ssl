@@ -1,0 +1,253 @@
+<!doctype html>
+<meta charset="utf-8">
+<title>vox label: setup</title>
+<style>
+  :root{
+    --bg:#12131a; --panel:#1b1d27; --line:#2c2f3d; --ink:#e8e9ef; --dim:#9297ab;
+    --real:#22d3ee; --fake:#fb923c;
+  }
+  *{box-sizing:border-box}
+  /* .rows sets display:flex, which would otherwise win over the UA hidden rule. */
+  [hidden]{display:none!important}
+  body{margin:0;background:var(--bg);color:var(--ink);
+       font:13px/1.45 ui-sans-serif,system-ui,-apple-system,"Segoe UI",sans-serif}
+  header{display:flex;align-items:center;gap:14px;padding:0 18px;height:42px;
+         border-bottom:1px solid var(--line);background:var(--panel)}
+  header h1{font-size:13px;margin:0;font-weight:600;letter-spacing:.02em}
+  .sub{color:var(--dim);font-size:12px}
+  .sp{flex:1}
+  main{max-width:840px;margin:0 auto;padding:18px 18px 40px;
+       display:flex;flex-direction:column;gap:14px}
+
+  .grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(140px,1fr));gap:10px}
+  label.f{display:flex;flex-direction:column;gap:3px;font-size:10.5px;color:var(--dim);
+          text-transform:uppercase;letter-spacing:.04em}
+  input,select{font:inherit;background:#232633;color:var(--ink);
+               border:1px solid var(--line);border-radius:5px;padding:5px 8px;width:100%}
+  input:focus,select:focus{outline:none;border-color:#404560}
+  input[readonly]{color:var(--dim)}
+
+  .modes{display:flex;gap:8px}
+  .modes button{flex:1}
+  button{font:inherit;border:1px solid var(--line);background:#232633;color:var(--ink);
+         border-radius:5px;padding:7px 14px;cursor:pointer}
+  button:hover{border-color:#404560}
+  button.on{border-color:var(--real);color:var(--real)}
+  button.go{padding:10px 26px;font-size:14px;font-weight:600;border-color:var(--real)}
+  button:disabled{opacity:.45;cursor:default}
+
+  .rows{display:flex;flex-direction:column;gap:6px}
+  .row{display:grid;grid-template-columns:1fr 200px;gap:12px;align-items:center;
+       border:1px solid var(--line);border-radius:6px;padding:8px 11px;cursor:pointer;
+       background:#1b1d27}
+  .row:hover{border-color:#404560}
+  .row.on{border-color:var(--real)}
+  .row .nm{font-weight:600}
+  .row .det{color:var(--dim);font-size:11px;margin-top:2px}
+  .row .num{font-variant-numeric:tabular-nums;font-size:11.5px;color:var(--dim);
+            text-align:right}
+  .bar{position:relative;height:7px;background:#282b39;border-radius:4px;margin-top:5px}
+  .bar i{position:absolute;top:0;bottom:0;left:0;background:var(--real);border-radius:4px}
+  .warn{color:var(--fake);font-size:11px;margin-top:3px}
+
+  table{border-collapse:collapse;width:100%;font-variant-numeric:tabular-nums;
+        font-size:11.5px;margin-top:10px}
+  th,td{padding:3px 8px;text-align:right;border-bottom:1px solid var(--line)}
+  th:first-child,td:first-child{text-align:left}
+  th{color:var(--dim);font-weight:500;font-size:10px;text-transform:uppercase;
+     letter-spacing:.04em}
+  code{font-family:ui-monospace,monospace;font-size:11px;color:var(--dim);
+       word-break:break-all}
+  .err{color:var(--fake);white-space:pre-wrap;font-family:ui-monospace,monospace;
+       font-size:11.5px}
+  .foot{display:flex;align-items:center;gap:14px}
+</style>
+
+<header>
+  <h1>vox label</h1>
+  <span class="sub">setup</span>
+  <span class="sp"></span>
+  <span class="sub" id="current"></span>
+</header>
+
+<main>
+  <div class="grid">
+    <label class="f">dataset<select id="dataset"></select></label>
+    <label class="f">annotator<input id="annotator" value="anon"></label>
+  </div>
+
+  <div class="modes">
+    <button id="m-resume" class="on">resume</button>
+    <button id="m-create">new campaign</button>
+  </div>
+
+  <div class="rows" id="campaigns"></div>
+
+  <div id="pane-create" hidden>
+    <div class="grid">
+      <label class="f">pool<select id="pool"></select></label>
+      <label class="f">detectors<input id="detectors" readonly></label>
+      <label class="f">directory<input id="outdir"></label>
+    </div>
+    <div class="grid" style="margin-top:10px">
+      <label class="f">n_max<input id="n_max" type="number" min="1"></label>
+      <label class="f">checkpoints J<input id="J" type="number" min="1" max="100"></label>
+      <label class="f">alpha<input id="alpha" type="number" step="0.005" min="0.0001" max="0.5"></label>
+      <label class="f">seed<input id="seed" type="number"></label>
+      <label class="f" style="justify-content:flex-end"><button id="plan">plan</button></label>
+    </div>
+    <div id="planout"></div>
+  </div>
+
+  <div class="foot">
+    <button class="go" id="start">start labeling</button>
+    <span id="status" class="sub"></span>
+  </div>
+  <div class="err" id="err"></div>
+</main>
+
+<script>
+const $ = id => document.getElementById(id);
+const GRID = ['n_max', 'J', 'alpha', 'seed'];
+let S = null, mode = 'resume', pick = null;
+
+const num = el => el.value === '' ? null : Number(el.value);
+const fmt = n => n == null ? '?' : n.toLocaleString();
+
+async function boot() {
+  S = await (await fetch('/api/setup')).json();
+  $('dataset').innerHTML = S.datasets.map(d =>
+    `<option value="${d.name}">${d.name} (${d.backend}, ${d.n_clips} clips)</option>`).join('');
+  $('dataset').onchange = () => { onPool(); renderCampaigns(); };
+  $('pool').innerHTML = S.pools.map((p, i) =>
+    `<option value="${i}">${p.dir}</option>`).join('') || '<option value="">none</option>';
+  $('pool').onchange = onPool;
+  for (const k of GRID) if (S.grid_defaults[k] != null) $(k).value = S.grid_defaults[k];
+  if (S.current && S.current.bound) {
+    $('current').textContent = `labeling ${S.current.name} (${fmt(S.current.n_labeled)} labeled)`;
+    $('annotator').value = S.current.annotator;
+  }
+  onPool(); renderCampaigns();
+}
+
+function onPool() {
+  const p = S.pools[$('pool').value];
+  if (!p) { $('detectors').value = ''; return; }
+  $('detectors').value = p.detectors.join(',');
+  $('outdir').value = suggestOutDir(`${$('dataset').value}_k${p.detectors.length}`);
+}
+
+// A frozen spec is never overwritten, so a name already on disk would be refused at
+// start. Suffix until it is free.
+function suggestOutDir(base) {
+  const taken = new Set(S.campaigns.map(c => c.dir.split('/').pop()));
+  let name = base;
+  for (let i = 2; taken.has(name); i++) name = `${base}_v${i}`;
+  return `outputs/label_campaigns/${name}`;
+}
+
+function renderCampaigns() {
+  const here = $('dataset').value;
+  $('campaigns').innerHTML = S.campaigns.map((c, i) => {
+    const pct = c.pct == null ? 0 : Math.min(100, c.pct);
+    const other = c.dataset && c.dataset !== here;
+    return `<div class="row${pick === i ? ' on' : ''}" data-i="${i}">
+      <div>
+        <div class="nm">${c.name}</div>
+        <div class="det">${c.detectors.join(', ')} &middot; J=${c.J} &middot; alpha=${c.alpha}</div>
+        ${other ? `<div class="warn">frozen on ${c.dataset}</div>` : ''}
+        ${c.pool_exists ? '' : '<div class="warn">pool csv missing</div>'}
+      </div>
+      <div>
+        <div class="num">${fmt(c.n_labeled)} / ${fmt(c.n_max)}${
+          c.pct == null ? '' : ` (${c.pct}%)`}</div>
+        <div class="bar"><i style="width:${pct}%"></i></div>
+      </div>
+    </div>`;
+  }).join('') || '<div class="sub">no campaigns yet</div>';
+  for (const el of $('campaigns').children) {
+    if (el.dataset.i === undefined) continue;
+    el.onclick = () => {
+      pick = Number(el.dataset.i);
+      const c = S.campaigns[pick];
+      if (c.dataset && S.view_defaults[c.dataset]) $('dataset').value = c.dataset;
+      onPool(); renderCampaigns();
+    };
+  }
+}
+
+function setMode(m) {
+  mode = m;
+  $('m-resume').classList.toggle('on', m === 'resume');
+  $('m-create').classList.toggle('on', m === 'create');
+  $('campaigns').hidden = m !== 'resume';
+  $('pane-create').hidden = m !== 'create';
+}
+$('m-resume').onclick = () => setMode('resume');
+$('m-create').onclick = () => setMode('create');
+
+function gridPayload() {
+  const p = S.pools[$('pool').value];
+  if (!p) throw new Error('no candidate pool on disk. Build one with '
+                          + 'scripts/build_candidate_pool.py');
+  return {
+    pool_csv: p.path, detectors: p.detectors,
+    n_max: num($('n_max')), J: num($('J')),
+    alpha: num($('alpha')), seed: num($('seed')),
+  };
+}
+
+async function post(url, body) {
+  const r = await fetch(url, {method: 'POST', headers: {'Content-Type': 'application/json'},
+                             body: JSON.stringify(body)});
+  const d = await r.json();
+  if (!r.ok) throw new Error(d.error || r.statusText);
+  return d;
+}
+
+$('plan').onclick = async () => {
+  $('err').textContent = '';
+  $('plan').disabled = true;
+  try { drawPlan(await post('/api/setup/plan', gridPayload())); }
+  catch (e) { $('err').textContent = e.message; }
+  $('plan').disabled = false;
+};
+
+function drawPlan(d) {
+  $('planout').innerHTML = `
+    <table><thead><tr><th>rule</th><th>f_V</th><th>stream at n_max</th>
+      <th>+/-pts</th><th>checkpoints</th></tr></thead><tbody>
+      ${d.precision.map(r => `<tr><td>${r.rule}</td><td>${r.f_v.toFixed(3)}</td>
+        <td>${fmt(r.stream_at_n_max)}</td><td>${r.half_width_pts.toFixed(2)}</td>
+        <td><code>${r.grid.join(' ')}</code></td></tr>`).join('')}
+      <tr><td>recall</td><td></td><td></td><td></td>
+        <td><code>${d.recall_grid.join(' ')}</code></td></tr>
+    </tbody></table>`;
+}
+
+$('start').onclick = async () => {
+  $('err').textContent = '';
+  $('status').textContent = 'loading the pool';
+  $('start').disabled = true;
+  try {
+    const base = {dataset: $('dataset').value,
+                  annotator: $('annotator').value.trim() || 'anon'};
+    if (mode === 'create') {
+      await post('/api/setup/start', {...base, ...gridPayload(), mode: 'create',
+                                      out_dir: $('outdir').value.trim()});
+    } else {
+      if (pick == null) throw new Error('pick a campaign to resume');
+      await post('/api/setup/start', {...base, mode: 'resume',
+                                      campaign_dir: S.campaigns[pick].dir});
+    }
+    location.href = '/';
+  } catch (e) {
+    $('err').textContent = e.message;
+    $('status').textContent = '';
+    $('start').disabled = false;
+  }
+};
+
+setMode('resume');
+boot();
+</script>

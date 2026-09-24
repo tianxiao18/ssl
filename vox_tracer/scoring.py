@@ -19,11 +19,13 @@ A per-detection ``score`` (confidence) may be swept: passing ``score_threshold``
 drops predictions below it *before* pooling/merging, which is exactly how a
 precision-recall curve is traced from a single permissive run.
 """
+import bisect
 import json
 import math
 from glob import glob
 from pathlib import Path
 
+import numpy as np
 import pandas as pd
 
 
@@ -52,6 +54,68 @@ def merge_intervals(intervals):
     return merged
 
 
+# ── many-to-many "does this interval overlap any interval in that set" ─────────
+# score_combined asks this in both directions (GT-vs-pred, pred-vs-GT) and it used
+# to be a naive O(n*m) double loop over iou_1d -- fine at small scale, but some
+# dryad_gerbil_full recordings have 10k-25k GT events against 5k-9k predicted
+# boxes, so that loop was the actual bottleneck of a full-corpus eval pass.
+
+def _overlaps_any_exact(query, ref):
+    """query/ref: [(start, stop)]. Returns a bool per query interval: does it have
+    positive-length intersection with >=1 ref interval? Exactly equivalent to
+    ``any(iou_1d(qs, qe, rs, re) > 0 for rs, re in ref)`` (a positive-length
+    intersection always has iou > 0 whenever both interval lengths are positive),
+    i.e. this is the iou_threshold<=0 case -- the one every call site in this repo
+    actually uses. O((n + m) log m) via sort-by-start + a prefix max-end sweep,
+    instead of O(n*m).
+    """
+    if not ref or not query:
+        return [False] * len(query)
+    starts, ends = zip(*sorted(ref))
+    prefix_max_end = list(ends)
+    for i in range(1, len(prefix_max_end)):
+        if prefix_max_end[i - 1] > prefix_max_end[i]:
+            prefix_max_end[i] = prefix_max_end[i - 1]
+
+    out = []
+    for qs, qe in query:
+        # ref[0:idx] are exactly the refs with start < qe (the other half of the
+        # strict-overlap condition ref.start < qe and ref.end > qs).
+        idx = bisect.bisect_left(starts, qe)
+        out.append(idx > 0 and prefix_max_end[idx - 1] > qs)
+    return out
+
+
+def _overlaps_any_numpy(query, ref, iou_threshold, chunk=2000):
+    """General version for iou_threshold > 0 (an actual IoU value, not just "any
+    overlap"), where the prefix-max-end trick above no longer applies. Still
+    O(n*m), but vectorized in numpy instead of a pure-Python double loop, and
+    chunked over `query` to bound peak memory on the largest recordings.
+    """
+    if not ref or not query:
+        return [False] * len(query)
+    q = np.asarray(query, dtype=np.float64)
+    r = np.asarray(ref, dtype=np.float64)
+    r_start, r_end = r[:, 0], r[:, 1]
+    r_len = r_end - r_start
+    out = np.empty(len(q), dtype=bool)
+    for i in range(0, len(q), chunk):
+        qs = q[i:i + chunk, 0:1]
+        qe = q[i:i + chunk, 1:2]
+        inter = np.minimum(qe, r_end[None, :]) - np.maximum(qs, r_start[None, :])
+        np.clip(inter, 0, None, out=inter)
+        union = (qe - qs) + r_len[None, :] - inter
+        iou = np.divide(inter, union, out=np.zeros_like(inter), where=union > 0)
+        out[i:i + chunk] = np.any(iou > iou_threshold, axis=1)
+    return out.tolist()
+
+
+def _overlaps_any(query, ref, iou_threshold):
+    if iou_threshold <= 0:
+        return _overlaps_any_exact(query, ref)
+    return _overlaps_any_numpy(query, ref, iou_threshold)
+
+
 # ── the scorer ──────────────────────────────────────────────────────────────────
 
 def score_combined(gt_intervals, pred_boxes, iou_threshold=0.0, score_threshold=None):
@@ -78,17 +142,15 @@ def score_combined(gt_intervals, pred_boxes, iou_threshold=0.0, score_threshold=
     pooled = [(t0, t1) for (t0, t1, _) in pred_boxes]
 
     # recall side — GT event detected if any raw prediction overlaps it
-    matched_gt = set()
-    for i, (gs, ge) in enumerate(gt_intervals):
-        if any(iou_1d(gs, ge, ps, pe) > iou_threshold for ps, pe in pooled):
-            matched_gt.add(i)
+    gt_hits = _overlaps_any(gt_intervals, pooled, iou_threshold)
+    matched_gt = {i for i, hit in enumerate(gt_hits) if hit}
     tp = len(matched_gt)
     fn = len(gt_intervals) - tp
 
     # precision side — predictions merged into events, event correct if it overlaps any GT
     pred_events = merge_intervals(pooled)
-    tp_events = [(es, ee) for es, ee in pred_events
-                 if any(iou_1d(es, ee, gs, ge) > iou_threshold for gs, ge in gt_intervals)]
+    event_hits = _overlaps_any(pred_events, gt_intervals, iou_threshold)
+    tp_events = [ev for ev, hit in zip(pred_events, event_hits) if hit]
     n_boxes = len(pooled)
     n_pred = len(pred_events)
     pred_tp = len(tp_events)

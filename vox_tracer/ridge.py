@@ -7,7 +7,7 @@ from skimage.filters import frangi, hessian, meijering, sato
 
 from vox_tracer.coco import image_entry, make_coco, poly_annotation, save_coco_per_channel
 from vox_tracer.paths import recording_dir_from_spec_dir
-from vox_tracer.spec import group_specs_by_channel, load_channel_audio
+from vox_tracer.spec import WindowReader, load_channel_audio, spec_windows_by_channel, window_fname
 
 FILTER_NAMES = ("sato", "meijering", "frangi", "hessian")
 
@@ -188,8 +188,9 @@ def run_ridge(
     recording_dir=None,
     reject_out_dir=None,
     prefix="headmic",
+    chunk_sec=1.0,
 ):
-    """Run a single ridge filter over all PNGs in spec_dir; write coco_ch_{ch}.json per channel.
+    """Run a single ridge filter over all spectrogram windows in spec_dir (PNGs, or HDF5 at chunk_sec); write coco_ch_{ch}.json per channel.
 
     Stage-1 (``compute_seg_mask``) forms candidate masks; stage-2
     (``passes_mask_filters``) then keeps a detection only if it spans >= min_mask_cols
@@ -218,7 +219,8 @@ def run_ridge(
     spec_dir = Path(spec_dir)
     if recording_dir is None:
         recording_dir = recording_dir_from_spec_dir(spec_dir)
-    by_ch = group_specs_by_channel(spec_dir, channels, prefix=prefix)
+    by_ch = spec_windows_by_channel(spec_dir, channels, prefix=prefix, chunk_sec=chunk_sec)
+    read_window = WindowReader()
     coco_by_ch = {}
     reject_coco_by_ch = {}
 
@@ -231,8 +233,8 @@ def run_ridge(
         if audio is None:
             print(f"  ridge ch{ch}: no audio in {recording_dir} -> spectral gates skipped")
         for path, t0, t1 in entries:
-            gray = cv2.imread(str(path), cv2.IMREAD_GRAYSCALE)
-            if gray is None:
+            gray = read_window(path, t0, t1)
+            if gray is None or gray.size == 0:
                 continue
             H, W    = gray.shape
             img_f    = gray.astype(np.float64) / 255.0
@@ -242,9 +244,10 @@ def run_ridge(
 
             iid = len(coco["images"])
             img_kw = dict(window_start_sec=t0, window_end_sec=t1)
-            coco["images"].append(image_entry(iid, path.name, W, H, **img_kw))
+            fname = window_fname(path, t0, t1, chunk_sec)
+            coco["images"].append(image_entry(iid, fname, W, H, **img_kw))
             if reject_out_dir is not None:
-                reject_coco["images"].append(image_entry(iid, path.name, W, H, **img_kw))
+                reject_coco["images"].append(image_entry(iid, fname, W, H, **img_kw))
             contours, _ = cv2.findContours(mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
             for cnt in contours:
                 if len(cnt) < 3:
@@ -280,6 +283,7 @@ def run_ridge(
                 coco["annotations"].append(ann)
         coco_by_ch[ch] = coco
         reject_coco_by_ch[ch] = reject_coco
+    read_window.close()
 
     save_coco_per_channel(coco_by_ch, out_dir)
     if reject_out_dir is not None:

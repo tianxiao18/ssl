@@ -53,6 +53,14 @@ rig's amplitude scale, and doesn't transfer across datasets. Known-good values:
       couple dB above the p90 call peak (typical calls reach near-white
       without saturating; the loudest outlier calls saturate, which is fine).
 
+  mongolia_wild_data: --lo -91 --hi -50 (fixed, NOT --calibrate)
+      24-bit PCM, sr=192000; load_channel_audio rescales to [-1, 1] and these
+      are on that scale. No annotations, so call windows came from unsupervised
+      detection (15-45kHz band, 12dB over band median, >=3 frames; 2399 events).
+        background: p90 ~ -91.0 dB (spread 1.0 dB across the 12 files)
+        event peaks: p90 ~ -52.6 dB corpus-wide, but per-file p90 swings 15.6 dB
+          -- hence fixed, same reason dryad_gerbil rejected --calibrate.
+
   Any new dataset: re-derive the same way (don't reuse any of the above pairs)
   -- sample background-only and known-call windows, check whether the
   resulting (lo, hi) is consistent across that dataset's recordings before
@@ -66,7 +74,7 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 from vox_tracer.spec import calibrate_db_range, load_channel_audio, write_chunk_spectrograms
 
-DATASETS = ("gerbil_ssl", "dryad_gerbil", "gerbil_family")
+DATASETS = ("gerbil_ssl", "dryad_gerbil", "gerbil_family", "mongolia_wild_data")
 
 parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
 parser.add_argument("--dataset", required=True, choices=DATASETS)

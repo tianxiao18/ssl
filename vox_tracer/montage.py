@@ -47,28 +47,41 @@ def overlay_polygons(bgr, polys, color=(0, 255, 255)):
 
 def viz_session_strip(spec_dir, pred_dir, out_dir, channels=None, cols=10,
                       sigmas=(2, 3, 4), threshold_pct=99.0, sample_rate=125000, freq_min=20000.0,
-                      prefix="headmic"):
+                      prefix="headmic", chunk_sec=1.0):
     """Three-row strip of every chunk in a session: raw | sato+exemplar box | predictions.
 
     The sato row shows the ridge response (yellow-green) with the pick_best_candidate
     box drawn in orange and its score labelled — useful for diagnosing bad SAM3 prompts.
+
+    spec_dir's storage format is auto-detected per channel, same as run_sam3:
+    {prefix}_{ch}_*.png chunks, else a {prefix}_{ch}_*.h5 per-recording spectrogram
+    windowed at chunk_sec (which must match the --chunk-sec used at generation time).
     """
     import json
     from collections import defaultdict
+    from glob import glob
 
     import numpy as np
     from skimage.filters import sato as _sato
 
     from vox_tracer.ridge import compute_seg_mask
-    from vox_tracer.sam3_runner import pick_best_candidate
-    from vox_tracer.spec import group_specs_by_channel
+    from vox_tracer.sam3_runner import _h5_windows, pick_best_candidate
+    from vox_tracer.spec import group_specs_by_channel, read_h5_window
 
     COLOR_PRED = (255, 100, 0)   # blue  — predictions
     COLOR_BOX  = (0, 165, 255)   # orange — exemplar box
     sigmas = list(sigmas)
     out_dir = Path(out_dir)
 
-    for ch, entries in group_specs_by_channel(spec_dir, channels, prefix=prefix).items():
+    by_ch = group_specs_by_channel(spec_dir, channels, prefix=prefix)
+    for ch in (channels or []):
+        if by_ch.get(ch):
+            continue  # PNGs already found for this channel
+        h5_matches = sorted(glob(str(Path(spec_dir) / f"{prefix}_{ch}_*.h5")))
+        if h5_matches:
+            by_ch[ch] = _h5_windows(Path(h5_matches[0]), chunk_sec=chunk_sec)
+
+    for ch, entries in sorted(by_ch.items()):
         pred_path = Path(pred_dir) / f"coco_ch_{ch}.json"
         if not pred_path.exists():
             continue
@@ -80,8 +93,14 @@ def viz_session_strip(spec_dir, pred_dir, out_dir, channels=None, cols=10,
 
         columns = []
         for path, t0, t1 in entries:
-            gray = cv2.imread(str(path), cv2.IMREAD_GRAYSCALE)
-            if gray is None:
+            if str(path).endswith(".h5"):
+                gray = read_h5_window(path, t0, t1)
+                # run_sam3 names HDF5-sourced coco images after the chunk they'd have been
+                fname = f"{Path(path).stem}_chunk_{round(t0 / chunk_sec) if chunk_sec else 0:05d}_t{t0:.2f}-{t1:.2f}.png"
+            else:
+                gray = cv2.imread(str(path), cv2.IMREAD_GRAYSCALE)
+                fname = path.name
+            if gray is None or gray.size == 0:
                 continue
             H, W  = gray.shape
             img_f = gray.astype(np.float64) / 255.0
@@ -108,8 +127,8 @@ def viz_session_strip(spec_dir, pred_dir, out_dir, channels=None, cols=10,
                             cv2.FONT_HERSHEY_SIMPLEX, 0.3, COLOR_BOX, 1, cv2.LINE_AA)
 
             pred_img = cv2.cvtColor(gray, cv2.COLOR_GRAY2BGR)
-            if path.name in img_by_fname:
-                iid = img_by_fname[path.name]["id"]
+            if fname in img_by_fname:
+                iid = img_by_fname[fname]["id"]
                 for ann in ann_by_imgid[iid]:
                     polys = ann.get("segmentation", [])
                     pred_img = (overlay_polygons(pred_img, polys, COLOR_PRED) if polys

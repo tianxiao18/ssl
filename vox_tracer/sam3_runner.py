@@ -1,4 +1,5 @@
 """SAM3 segmentation guided by a sato ridge-filter candidate exemplar."""
+from glob import glob
 from pathlib import Path
 
 import cv2
@@ -10,32 +11,42 @@ from skimage.filters import sato
 from vox_tracer.coco import image_entry, make_coco, mask_to_polygons, poly_annotation, save_coco_per_channel
 from vox_tracer.paths import recording_dir_from_spec_dir
 from vox_tracer.ridge import compute_seg_mask, detection_spectral_features, passes_mask_filters
-from vox_tracer.spec import group_specs_by_channel, load_channel_audio
+from vox_tracer.spec import group_specs_by_channel, load_channel_audio, read_h5_window
+from vox_tracer.spec import h5_windows as _h5_windows
 
 
 _SATO_CACHE = {}
 
 
-def _gray_and_sato(path, sigmas, cache=True):
-    """Return (gray uint8, sato response float64) for path.
+def _gray_and_sato(source, t0, t1, sigmas, cache=True):
+    """Return (gray uint8, sato response float64) for one window.
 
-    Returns None if the image can't be read. The response is treated as read-only
+    source is either a per-chunk PNG Path (scripts/gen_spectrograms.py's output --
+    read directly, t0/t1 unused beyond the cache key) or a per-recording HDF5 Path
+    (scripts/gen_spectrograms_h5.py's output -- one continuous STFT per recording,
+    see vox_tracer.spec.write_recording_spectrogram_h5; t0/t1 select the window via
+    read_h5_window). Auto-detected by source's suffix so callers don't have to care.
+
+    Returns None if the window can't be read. The response is treated as read-only
     by callers (compute_seg_mask / pick_best_candidate only read it).
 
-    Caching (by (path, sigmas)) exists solely for the hyperparameter sweep
+    Caching (by (source, t0, t1, sigmas)) exists solely for the hyperparameter sweep
     (sweep_core.gpu_pass), which re-runs over the SAME PNGs every trial while
     sigmas stays fixed, so the sato response is computed once and reused across
-    trials. The single-pass run_sam3 production path visits each PNG exactly once,
-    so it passes cache=False: caching there never hits and would otherwise
+    trials. The single-pass run_sam3 production path visits each window exactly
+    once, so it passes cache=False: caching there never hits and would otherwise
     accumulate ~1 MB/window across all recordings until the process OOMs.
     """
-    key = (str(path), tuple(sigmas))
+    key = (str(source), t0, t1, tuple(sigmas))
     if cache:
         hit = _SATO_CACHE.get(key)
         if hit is not None:
             return hit
-    gray = cv2.imread(str(path), cv2.IMREAD_GRAYSCALE)
-    if gray is None:
+    if str(source).endswith(".h5"):
+        gray = read_h5_window(source, t0, t1)
+    else:
+        gray = cv2.imread(str(source), cv2.IMREAD_GRAYSCALE)
+    if gray is None or gray.size == 0:
         return None
     img_f = gray.astype(np.float64) / 255.0
     response = sato(img_f, sigmas=list(sigmas), black_ridges=False)
@@ -107,6 +118,7 @@ def iter_sam3_windows(
     horiz_aspect=0.2,
     close_kernel=(7, 3),
     cache_sato=True,
+    chunk_sec=1.0,
 ):
     """Yield per-window ridge + raw SAM3 results, *without* post-hoc filtering.
 
@@ -114,17 +126,27 @@ def iter_sam3_windows(
     seg_mask (ridge segmentation), best_box (SAM3 prompt or None), and
     raw_masks (list of (mask_u8, score); empty when best_box is None).
 
+    entries is [(source, t0, t1), ...] -- source is a PNG Path (one physical file
+    per window, from group_specs_by_channel) or an HDF5 Path (one file shared by
+    every window of a recording, from vox_tracer.spec.write_recording_spectrogram_h5);
+    see _gray_and_sato. chunk_sec only matters for HDF5 sources, to synthesize a
+    fname in the same {base}_chunk_{i:05d}_t{t0:.2f}-{t1:.2f}.png convention PNG
+    mode already uses (no such file exists on disk for HDF5 sources, but keeping
+    the naming convention means COCO consumers -- evaluate.py, parse_spec_fname,
+    ... -- need no changes for scoring; only code that re-reads that filename as a
+    real image, e.g. montage/viz sampling, won't find one for HDF5-sourced runs).
+
     This is the expensive GPU stage. Post-hoc filters (vox_tracer.ridge.passes_mask_filters)
     are applied by the caller, so a single pass can be re-scored cheaply under
     many stage-2 settings.
 
     cache_sato defaults True for the sweep (re-runs over the same PNGs across
-    trials); run_sam3 passes False for its single pass over each PNG so the sato
-    cache doesn't accumulate across all recordings (see _gray_and_sato).
+    trials); run_sam3 passes False for its single pass over each window so the
+    sato cache doesn't accumulate across all recordings (see _gray_and_sato).
     """
     sigmas = list(sigmas)
-    for path, t0, t1 in entries:
-        got = _gray_and_sato(path, sigmas, cache=cache_sato)
+    for source, t0, t1 in entries:
+        got = _gray_and_sato(source, t0, t1, sigmas, cache=cache_sato)
         if got is None:
             continue
         gray, response = got
@@ -146,7 +168,13 @@ def iter_sam3_windows(
                 mask_u8 = mask_tensor.squeeze(0).cpu().numpy().astype(np.uint8) * 255
                 raw_masks.append((mask_u8, float(score)))
 
-        yield {"fname": path.name, "H": H, "W": W,
+        if str(source).endswith(".h5"):
+            idx = round(t0 / chunk_sec) if chunk_sec else 0
+            fname = f"{Path(source).stem}_chunk_{idx:05d}_t{t0:.2f}-{t1:.2f}.png"
+        else:
+            fname = source.name
+
+        yield {"fname": fname, "H": H, "W": W,
                "window_start": t0, "window_end": t1,
                "seg_mask": seg_mask, "best_box": best_box, "raw_masks": raw_masks}
 
@@ -174,8 +202,17 @@ def run_sam3(
     overwrite=False,
     processor=None,
     prefix="headmic",
+    chunk_sec=1.0,
 ):
-    """Run SAM3 on pre-generated spectrogram PNGs; write coco_ch_{ch}.json per channel.
+    """Run SAM3 on pre-generated spectrograms; write coco_ch_{ch}.json per channel.
+
+    spec_dir's storage format is auto-detected per channel: {prefix}_{ch}_*.png
+    (scripts/gen_spectrograms.py, one file per second -- gerbil_ssl, dryad_gerbil,
+    gerbil_family today) or {prefix}_{ch}_*.h5 (scripts/gen_spectrograms_h5.py, one
+    continuous-spectrogram file per recording -- dryad_gerbil_full, whose ~1900
+    recordings would be ~3.9M PNGs otherwise). chunk_sec only matters for the HDF5
+    path (must match the --chunk-sec used at generation time for aligned reads;
+    irrelevant, and ignored, for PNG-sourced channels).
 
     Pass a pre-built `processor` (from build_processor) to skip model loading.
 
@@ -192,6 +229,13 @@ def run_sam3(
         recording_dir = recording_dir_from_spec_dir(spec_dir)
 
     by_ch = group_specs_by_channel(spec_dir, channels, prefix=prefix)
+    for ch in (channels or []):
+        if by_ch.get(ch):
+            continue  # PNGs already found for this channel
+        h5_matches = sorted(glob(str(spec_dir / f"{prefix}_{ch}_*.h5")))
+        if h5_matches:
+            by_ch[ch] = _h5_windows(Path(h5_matches[0]), chunk_sec=chunk_sec)
+
     coco_by_ch = {}
 
     pending = {ch: entries for ch, entries in by_ch.items()
@@ -229,7 +273,7 @@ def run_sam3(
         if audio is None:
             print(f"  sam3 ch{ch}: no audio in {recording_dir} -> spectral gates skipped")
 
-        for win in iter_sam3_windows(processor, entries, cache_sato=False, **stage1):
+        for win in iter_sam3_windows(processor, entries, cache_sato=False, chunk_sec=chunk_sec, **stage1):
             iid = len(coco["images"])
             coco["images"].append(
                 image_entry(iid, win["fname"], win["W"], win["H"],

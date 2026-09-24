@@ -1,9 +1,14 @@
 """
-Run any vox_tracer model on pre-generated spectrogram PNGs.
+Run any vox_tracer model on pre-generated spectrograms.
 
 spec_dir is always outputs/spectrograms/<dataset>[/<recording>] and out_dir is
 always <out_dir>/<dataset>[/<recording>] -- --dataset is required and out_dir is
 just the stage/variant name (e.g. "outputs/ridge_flatness", "outputs/sam3_best").
+sam3, ridge and squeakout auto-detect, per dataset, whether spectrograms were generated as one PNG
+per second (scripts/gen_spectrograms.py; spec_dir -> outputs/spectrograms/...)
+or one continuous HDF5 per recording (scripts/gen_spectrograms_h5.py; spec_dir ->
+outputs/spectrograms_h5/...) -- the latter exists for large corpora (e.g.
+dryad_gerbil_full) where one-PNG-per-second would be millions of files.
 
 Single recording:
     python scripts/run.py ridge     <out_dir> --dataset <dataset> --recording <exp>/<idx> [options]
@@ -24,6 +29,11 @@ python scripts/run.py sam3 outputs/sam3 --dataset gerbil_ssl \
 # all recordings in parallel
 python scripts/run.py sam3 outputs/sam3 --dataset gerbil_ssl \
     --all --sam3-checkpoint sam3/sam3.pt
+
+# HDF5-backed dataset: same command, auto-detected from outputs/spectrograms_h5/<dataset>
+python scripts/run.py sam3 outputs/sam3_h5 --dataset dryad_gerbil_full \
+    --recording cohort2_formatted/2020_07_19_16_32_55_857727_merged \
+    --channels 0 --prefix mic --sam3-checkpoint sam3/sam3.pt
 """
 import argparse
 import sys
@@ -32,7 +42,8 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
-DATASETS = ("gerbil_ssl", "dryad_gerbil", "gerbil_family")
+DATASETS = ("gerbil_ssl", "dryad_gerbil", "gerbil_family", "dryad_gerbil_full", "mongolia_wild_data",
+            "dryad_gerbil_full_smoketest")
 
 
 def _discover(base):
@@ -40,6 +51,19 @@ def _discover(base):
     for exp_dir in sorted(Path(base).glob("experiment_*")):
         for idx_dir in sorted(exp_dir.glob("idx_*")):
             yield Path(exp_dir.name) / idx_dir.name, idx_dir
+
+
+def _discover_h5(base, channels, prefix):
+    """Yield (rel_path, abs_recording_dir) for every recording under base with a
+    {prefix}_{ch}_*.h5 for any requested channel. Handles any directory depth
+    (flat, experiment_*/idx_*, cohort*_formatted/<rec>, ...) since HDF5 datasets
+    aren't assumed to share gerbil_ssl's fixed two-level layout."""
+    seen = set()
+    for ch in channels:
+        for h5 in sorted(Path(base).glob(f"**/{prefix}_{ch}_*.h5")):
+            seen.add(h5.parent.relative_to(base))
+    for rel in sorted(seen):
+        yield rel, Path(base) / rel
 
 
 def _run_one(model, spec_dir, out_dir, kw):
@@ -110,6 +134,8 @@ p_ridge.add_argument("--max-flatness",        type=float, default=None,
                      help="reject detections whose band-limited spectral flatness exceeds this "
                           "(disabled unless set; flatness-only best is ~0.21). To run flatness "
                           "as the sole stage-2 filter also pass --min-mask-cols 0 --min-centroid-hz 0")
+p_ridge.add_argument("--chunk-sec", type=float, default=1.0,
+                     help="HDF5-backed datasets only: window size in seconds (see sam3 --chunk-sec)")
 p_ridge.add_argument("--reject-out-dir",      default=None,
                      help="also write every stage-2-rejected stage-1 candidate here, tagged with "
                           "extra.reject_reason (diagnostic only, not scored). With --all this is "
@@ -123,6 +149,8 @@ p_sq.add_argument("--batch-size", type=int, default=16)
 p_sq.add_argument("--mask-threshold", type=float, default=None,
                   help="sigmoid cut to binarize masks (default: model's ~0.51). Lower it "
                        "(e.g. 0.1) for a permissive run so pr_curves.py has a high-recall arm.")
+p_sq.add_argument("--chunk-sec", type=float, default=1.0,
+                  help="HDF5-backed datasets only: window size in seconds (see sam3 --chunk-sec)")
 p_sq.add_argument("--overwrite",  action="store_true",
                   help="reprocess channels that already have output")
 # stage-2 detection filters (shared with ridge/sam3 so the comparison is fair)
@@ -172,6 +200,11 @@ p_sam3.add_argument("--max-flatness",         type=float, default=None,
                          "(disabled unless set)")
 p_sam3.add_argument("--overwrite",            action="store_true",
                     help="reprocess channels that already have output")
+p_sam3.add_argument("--chunk-sec", type=float, default=1.0,
+                    help="only used for HDF5-backed datasets (dryad_gerbil_full): window size in "
+                         "seconds tiled over each recording's continuous spectrogram -- must match "
+                         "the --chunk-sec used at generation time for aligned reads. Ignored for "
+                         "PNG-backed datasets.")
 
 # --- das_yolo ---
 p_yolo = sub.add_parser("das_yolo", help="DAS-guided YOLO detection")
@@ -202,7 +235,7 @@ if args.model == "ridge":
               min_mask_cols=args.min_mask_cols,
               min_centroid_hz=args.min_centroid_hz,
               max_flatness=args.max_flatness,
-              prefix=args.prefix)
+              prefix=args.prefix, chunk_sec=args.chunk_sec)
 elif args.model == "squeakout":
     kw = dict(channels=channels, checkpoint=args.checkpoint, batch_size=args.batch_size,
               mask_threshold=args.mask_threshold, overwrite=args.overwrite,
@@ -212,7 +245,7 @@ elif args.model == "squeakout":
               min_mask_cols=args.min_mask_cols,
               min_centroid_hz=args.min_centroid_hz,
               max_flatness=args.max_flatness,
-              prefix=args.prefix)
+              prefix=args.prefix, chunk_sec=args.chunk_sec)
 elif args.model == "sam3":
     kw = dict(channels=channels, checkpoint=args.sam3_checkpoint,
               sigmas=[float(s) for s in args.sigmas.split(",")],
@@ -228,11 +261,19 @@ elif args.model == "sam3":
               min_centroid_hz=args.min_centroid_hz,
               max_flatness=args.max_flatness,
               overwrite=args.overwrite,
-              prefix=args.prefix)
+              prefix=args.prefix,
+              chunk_sec=args.chunk_sec)
 elif args.model == "das_yolo":
     kw = dict(channels=channels, chunk_sec=args.chunk_sec)
 
-spec_base = Path("outputs") / "spectrograms" / args.dataset
+# sam3, ridge and squeakout auto-detect PNG- vs HDF5-backed datasets: prefer outputs/spectrograms/<dataset>
+# (scripts/gen_spectrograms.py) if it exists, else fall back to
+# outputs/spectrograms_h5/<dataset> (scripts/gen_spectrograms_h5.py, e.g. dryad_gerbil_full).
+_png_base = Path("outputs") / "spectrograms" / args.dataset
+_h5_base  = Path("outputs") / "spectrograms_h5" / args.dataset
+uses_h5 = (args.model in ("sam3", "ridge", "squeakout")
+           and not _png_base.exists() and _h5_base.exists())
+spec_base = _h5_base if uses_h5 else _png_base
 out_base  = Path(args.out_dir) / args.dataset
 reject_base = (Path(args.reject_out_dir) / args.dataset
                if args.model == "ridge" and args.reject_out_dir else None)
@@ -253,10 +294,17 @@ elif args.all:
             for rel, idx_dir in _discover(spec_base)
         ]
     elif args.model == "ridge" and reject_base:
+        discovered = (_discover_h5(spec_base, channels, args.prefix) if uses_h5
+                      else _discover(spec_base))
         tasks = [
             (str(idx_dir), str(out_base / rel),
              {**kw, "reject_out_dir": str(reject_base / rel)})
-            for rel, idx_dir in _discover(spec_base)
+            for rel, idx_dir in discovered
+        ]
+    elif uses_h5:
+        tasks = [
+            (str(rec_dir), str(out_base / rel), kw)
+            for rel, rec_dir in _discover_h5(spec_base, channels, args.prefix)
         ]
     else:
         tasks = [
