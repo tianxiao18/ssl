@@ -101,3 +101,43 @@ Reads each method's `metrics.csv` from `outputs/eval/gerbil_ssl/ridge/`,
 `evaluate.py` per method, per Step 3) and writes one grouped bar chart
 (Recall/Precision/F1 per method, micro-averaged across recordings with
 per-recording std error bars).
+
+---
+
+## Evaluation GUI
+
+Efficient benchmarking/labeling of candidate detections pooled from several detectors, used to
+estimate each detector's (and each ensemble rule's) precision and relative recall with
+exact confidence intervals.
+
+### 1. Prediction format
+
+One directory per detector, same layout as Step 2's output:
+
+```
+outputs/<detector>/<dataset>/<experiment>/<idx>/coco_ch_<ch>.json
+```
+
+Each file is [standard COCO](https://cocodataset.org/#format-data) plus
+`window_start_sec` / `window_end_sec` on each image. For interval-only detectors, see
+`scripts/das_to_coco.py`.
+
+### 2. Build the candidate pool
+
+```bash
+python scripts/build_candidate_pool.py --dataset gerbil_ssl \
+    --detectors sam3_best,ridge,squeakout,das_yolo \
+    --out outputs/label_campaigns/<name>/candidates.csv
+```
+
+Detections from all detectors and channels are put on one time axis, and overlapping
+ones are merged into one candidate. Only clips covered by every detector are used.
+
+### 3. Launch the GUI
+
+```bash
+python scripts/label_gui.py --annotator <your_name>
+```
+
+Open the printed URL, then pick the dataset and create or resume a campaign on the setup
+page. Over SSH, forward the port first: `ssh -L 8765:localhost:8765 <workstation>`.

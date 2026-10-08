@@ -28,6 +28,7 @@ import numpy as np
 
 from vox_tracer.spec import group_specs_by_channel
 
+cv2.setNumThreads(1)
 
 def band_rows(height, nyquist_hz, f_lo_hz, f_hi_hz):
     """Row slice (top, bottom) covering [f_lo, f_hi] Hz.
