@@ -34,6 +34,7 @@ from urllib.parse import parse_qs, urlparse
 
 from vox_label import setup as setup_mod
 from vox_label.anytime import cs_interval
+from vox_label.audio import snippet_wav
 from vox_label.exact_grid import GammaCache, exact_grid_interval, f1_from_jaccard
 from vox_label.ranking import corpus_stats, curve, omega_grid, rank
 from vox_label.render import band_rows, clip_channels, to_jpeg
@@ -246,23 +247,23 @@ class LabelService:
                                         {r: self.c.rule_fn(r) for r in self.c.rules})
         return params
 
-    def compute_ranking(self, omega=None):
+    def compute_ranking(self, omega=None, progress=None):
         params = self._ranking_setup()
         if params is None:
             return None
         return rank(self.c.annotations(self.labels), self.c.rules,
                     {r: self.c.rule_fn(r) for r in self.c.rules}, self._corpus,
                     params["omega"] if omega is None else omega, params["delta"],
-                    self.c.alpha, params.get("a_star_guess", 0.5))
+                    self.c.alpha, params.get("a_star_guess", 0.5), progress=progress)
 
-    def compute_curve(self):
+    def compute_curve(self, progress=None):
         params = self._ranking_setup()
         if params is None:
             return None
         return curve(self.c.annotations(self.labels), self.c.rules,
                      {r: self.c.rule_fn(r) for r in self.c.rules}, self._corpus,
                      omega_grid(params["omega"]), self.c.alpha,
-                     params.get("a_star_guess", 0.5))
+                     params.get("a_star_guess", 0.5), progress=progress)
 
     def ranking(self, start=False, omega=None):
         """Latest ranking at `omega` (default: the frozen one). Only the frozen omega
@@ -304,10 +305,16 @@ class LabelService:
                 key = self._queue.pop(0)
                 n = len(self.labels)
                 prev = self._jobs.get(key, {})
-                self._jobs[key] = {**prev, "status": "computing"}
+                self._jobs[key] = {**prev, "status": "computing", "progress": [0, None]}
+
+            def progress(done, total, key=key):
+                with self.lock:
+                    self._jobs[key]["progress"] = [done, total]
+
             try:
                 kind, w = key
-                result = self.compute_ranking(w) if kind == "rank" else self.compute_curve()
+                result = (self.compute_ranking(w, progress) if kind == "rank"
+                          else self.compute_curve(progress))
                 done = {"status": "ready", "at": n, "result": result}
             except Exception:
                 done = {"status": "error", "at": None,
@@ -328,6 +335,13 @@ class LabelService:
         gray, a, b = self.source.crop(row["clip"], int(ch), lo, hi)
         top, bot = band_rows(gray.shape[0], self.nyquist_hz, self.f_lo_hz, self.f_hi_hz)
         return to_jpeg(gray[top:bot], self.disp_w, self.jpeg_q), a, b
+
+    def audio_wav(self, cand_id, ch, slow=1):
+        """The crop's time window as audio, slowed by `slow`; see vox_label.audio."""
+        row = self.c.pool[int(cand_id)]
+        lo, hi = row["t_start"] - self.pad, row["t_end"] + self.pad
+        return snippet_wav(self.source.wav_path(row["clip"], int(ch)), lo, hi,
+                           self.f_lo_hz, self.f_hi_hz, slow)
 
     # ── the live panel: anytime-valid, so looking costs nothing ──────────────────
 
@@ -491,6 +505,11 @@ def make_handler(session):
                 if u.path == "/api/crop":
                     jpg, a, b = svc.crop_jpeg(q["cand_id"][0], q["ch"][0])
                     return self._send(200, jpg, "image/jpeg",
+                                      {"X-Span-Lo": f"{a:.6f}", "X-Span-Hi": f"{b:.6f}"})
+                if u.path == "/api/audio":
+                    wav, a, b = svc.audio_wav(q["cand_id"][0], q["ch"][0],
+                                              float(q.get("slow", ["1"])[0]))
+                    return self._send(200, wav, "audio/wav",
                                       {"X-Span-Lo": f"{a:.6f}", "X-Span-Hi": f"{b:.6f}"})
                 if u.path == "/api/meta":
                     return self._send(200, {

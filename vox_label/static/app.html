@@ -36,6 +36,15 @@
   .frame .chip{position:absolute;top:5px;left:7px;font-size:10.5px;color:var(--dim);
                background:rgba(0,0,0,.62);padding:1px 6px;border-radius:4px}
   .frame svg{position:absolute;inset:0;width:100%;height:100%;pointer-events:none}
+  .frame{cursor:pointer}
+  .frame.playing{border-color:var(--real)}
+  #auto.on{border-color:var(--real);color:var(--real)}
+  .ctl{display:inline-flex;gap:4px}
+  .ic{display:inline-flex;align-items:center;justify-content:center;min-width:28px;height:24px;
+      padding:0 7px;font-size:11.5px;color:var(--dim);border:1px solid var(--line);
+      border-radius:5px;background:#232633;text-decoration:none;font-variant-numeric:tabular-nums}
+  .ic:hover{color:var(--ink)}
+  .ic svg{width:13px;height:13px}
 
   .right{background:var(--panel);border:1px solid var(--line);border-radius:6px;
          display:flex;flex-direction:column;min-height:0}
@@ -110,7 +119,6 @@
   .rk .pr .g{color:var(--dim);font-size:10.5px}
   .rk .rel{font-weight:600;color:var(--real);padding:0 4px}
   .rk .open .rel{color:var(--dim)}
-  .rk .stale{color:var(--dim);font-size:10.5px}
   /* Rank column: tiers as a number, repeated for ties. */
   .rk td.rank{color:var(--dim);text-align:right;padding-right:2px;width:1.5em}
   .rk tr.lbl td{padding:6px 7px 1px;color:var(--dim);font-size:10px}
@@ -136,6 +144,19 @@
   #omega::-moz-range-track{height:4px;background:var(--line);border-radius:2px}
   #omega::-moz-range-thumb{width:12px;height:12px;border:0;border-radius:50%;background:var(--real)}
   #rkcurve text.ax{fill:var(--ink);font-size:9.5px}
+  /* Outdated numbers stay in place but dimmed, with a spinner and count where they are. */
+  .pbar{display:inline-block;position:relative;width:90px;height:5px;border-radius:3px;
+        background:var(--line);overflow:hidden;vertical-align:1px;margin-right:6px}
+  .pbar i{position:absolute;top:0;bottom:0;left:0;background:var(--real);border-radius:3px;
+          transition:width .3s}
+  /* Queued or not yet reporting: a sliding segment, since there is no fraction yet. */
+  .pbar.wait i{width:30%;animation:slide 1.2s ease-in-out infinite}
+  @keyframes slide{from{left:-30%}to{left:100%}}
+  .upd{color:var(--dim);font-size:10.5px;font-variant-numeric:tabular-nums;margin-left:6px}
+  #ranking.old table,#ranking.old .pr{opacity:.35;transition:opacity .2s}
+  #rkcurve.old .plot{opacity:.35;transition:opacity .2s}
+  #rkcurve .busy{position:absolute;left:0;right:0;top:38%;text-align:center;pointer-events:none;
+                 font-size:10.5px;color:var(--ink);font-variant-numeric:tabular-nums}
   .rk .xp{color:var(--fake);font-size:10px;margin-left:4px}
   #ranking.explore .rel,#ranking.explore td.rank{color:var(--dim)}
   .rk td.rank + td{text-align:left}
@@ -150,8 +171,13 @@
   <span class="sp"></span>
   <span class="counter"><b id="ndone">0</b> labeled</span>
   <span class="counter">next checkpoint in <b id="tonext">?</b></span>
-  <button id="ckpt" style="padding:3px 10px;font-size:12px"><kbd>r</kbd>checkpoint</button>
-  <a href="/setup" style="color:var(--dim);font-size:12px;text-decoration:none">setup</a>
+  <span class="ctl">
+    <button id="play" class="ic" title="play (p)"><svg viewBox="0 0 16 16"><path d="M4 2.5v11l9.5-5.5z" fill="currentColor"/></svg></button>
+    <button id="auto" class="ic" title="autoplay (shift+p)"><svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.6"><path d="M13 8a5 5 0 1 1-1.5-3.6"/><path d="M12 1.5v3.2H8.8"/></svg></button>
+    <button id="speed" class="ic" title="speed ([ / ])">1×</button>
+  </span>
+  <button id="ckpt" class="ic" title="checkpoint (r)"><svg viewBox="0 0 16 16"><path d="M2 14V9h3v5zm4.5 0V4h3v10zM11 14V6.5h3V14z" fill="currentColor"/></svg></button>
+  <a href="/setup" class="ic" title="setup"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 0 1 0 2.83 2 2 0 0 1-2.83 0l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-2 2 2 2 0 0 1-2-2v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 0 1-2.83 0 2 2 0 0 1 0-2.83l.06-.06a1.65 1.65 0 0 0 .33-1.82 1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1-2-2 2 2 0 0 1 2-2h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 0 1 0-2.83 2 2 0 0 1 2.83 0l.06.06a1.65 1.65 0 0 0 1.82.33H9a1.65 1.65 0 0 0 1-1.51V3a2 2 0 0 1 2-2 2 2 0 0 1 2 2v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 0 1 2.83 0 2 2 0 0 1 0 2.83l-.06.06a1.65 1.65 0 0 0-.33 1.82V9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 0 1 2 2 2 2 0 0 1-2 2h-.09a1.65 1.65 0 0 0-1.51 1z"/></svg></a>
 </header>
 
 <div class="wrap">
@@ -161,7 +187,7 @@
   </div>
   <div class="right">
     <h2>anytime-valid performance estimates</h2>
-    <div class="scroll"><div class="rk"><div id="rkcurve"><div class="plot"></div><div class="tip" hidden></div>
+    <div class="scroll"><div class="rk"><div id="rkcurve"><div class="plot"></div><div class="tip" hidden></div><div class="busy" hidden></div>
       <div class="sl"><input type="range" id="omega" min="0" max="20" step="1"></div></div>
       <div id="ranking"></div></div><table id="live"><thead><tr>
       <th>rule</th><th>n</th><th>est</th><th>interval</th><th></th>
@@ -193,6 +219,7 @@ let cur = null, combined = false, shownAt = 0, busy = false, pollTimer = null;
 async function load() { render(await (await api('/api/next')).json()); }
 
 function render(d) {
+  stopAudio();
   cur = d; combined = false; shownAt = performance.now();
   $('#flag').classList.remove('on');
   $('#ndone').textContent = d.n_labeled ?? 0;
@@ -218,18 +245,99 @@ function render(d) {
   const x1 = 1000 * (d.t_end - d.view_lo) / span;
 
   $('#frames').innerHTML = d.channels.map(ch => `
-    <div class="frame">
+    <div class="frame" data-ch="${ch}">
       <img src="/api/crop?cand_id=${d.cand_id}&ch=${ch}" alt="">
       <span class="chip">ch ${ch}</span>
       <svg viewBox="0 0 1000 100" preserveAspectRatio="none">
         <rect x="${x0}" y="0" width="${Math.max(x1 - x0, 0.6)}" height="100"
               fill="none" stroke="var(--real)" stroke-width="2"
               stroke-dasharray="7 5" vector-effect="non-scaling-stroke"/>
+        <line class="ph" x1="0" x2="0" y1="0" y2="100" stroke="var(--ink)" stroke-width="1.5"
+              vector-effect="non-scaling-stroke" visibility="hidden"/>
       </svg>
     </div>`).join('');
 
   if (d.reveal_due) openReport();
+  else if (autoplay) play(d.channels[0]);
 }
+
+// ── playback: the crop's window, band-passed, at a chosen fraction of real time ──
+
+const SPEEDS = [1, 1 / 2, 1 / 4, 1 / 8];
+const SPEED_TXT = ['1×', '½×', '¼×', '⅛×'];
+const player = new Audio();
+let autoplay = false, playing = null, playToken = 0, speedIdx = 1;
+try {
+  autoplay = localStorage.getItem('vox-autoplay') === '1';
+  const i = SPEEDS.indexOf(+localStorage.getItem('vox-speed'));
+  if (i >= 0) speedIdx = i;
+} catch (e) {}
+$('#auto').classList.toggle('on', autoplay);
+$('#speed').textContent = SPEED_TXT[speedIdx];
+
+// Takes effect from the next play; the current one keeps its speed.
+function setSpeed(i) {
+  speedIdx = Math.min(SPEEDS.length - 1, Math.max(0, i));
+  $('#speed').textContent = SPEED_TXT[speedIdx];
+  try { localStorage.setItem('vox-speed', SPEEDS[speedIdx]); } catch (e) {}
+}
+
+function setAutoplay(on) {
+  autoplay = on;
+  $('#auto').classList.toggle('on', on);
+  try { localStorage.setItem('vox-autoplay', on ? '1' : '0'); } catch (e) {}
+  if (on && cur && !cur.done && !playing) play(cur.channels[0]);
+  if (!on) stopAudio();
+}
+
+function stopAudio() {
+  playToken++;
+  player.pause();
+  if (player.src) { URL.revokeObjectURL(player.src); player.removeAttribute('src'); }
+  playing = null;
+  document.querySelectorAll('.frame.playing').forEach(f => f.classList.remove('playing'));
+  document.querySelectorAll('.frame .ph').forEach(l => l.setAttribute('visibility', 'hidden'));
+}
+
+// Defaults to the first channel shown, never the one a detector fired on (blind).
+async function play(ch) {
+  if (!cur || cur.done) return;
+  stopAudio();
+  const token = playToken, c = cur;
+  const r = await api(`/api/audio?cand_id=${c.cand_id}&ch=${ch}&slow=${1 / SPEEDS[speedIdx]}`);
+  if (token !== playToken) return;              // labeled or replaced meanwhile
+  if (!r.ok) return console.warn('audio', r.status, await r.text());
+  const lo = +r.headers.get('X-Span-Lo'), hi = +r.headers.get('X-Span-Hi');
+  player.src = URL.createObjectURL(await r.blob());
+  if (token !== playToken) return;
+  const frame = document.querySelector(`.frame[data-ch="${ch}"]`);
+  playing = {frame, lo, hi, c};
+  frame?.classList.add('playing');
+  player.play().catch(e => { stopAudio(); console.warn('audio', e); });
+  requestAnimationFrame(tick);
+}
+
+// Playhead: audio time back to the view's [view_lo, view_hi], like the bracket.
+function tick() {
+  if (!playing || !playing.frame) return;
+  const {frame, lo, hi, c} = playing, line = frame.querySelector('.ph');
+  if (player.ended) { stopAudio(); return; }
+  if (player.duration) {
+    const t = lo + (hi - lo) * player.currentTime / player.duration;
+    const x = 1000 * (t - c.view_lo) / (c.view_hi - c.view_lo);
+    line.setAttribute('x1', x); line.setAttribute('x2', x);
+    line.setAttribute('visibility', 'visible');
+  }
+  requestAnimationFrame(tick);
+}
+
+$('#frames').addEventListener('click', e => {
+  const f = e.target.closest('.frame[data-ch]');
+  if (f) play(+f.dataset.ch);
+});
+$('#play').addEventListener('click', () => cur && !cur.done && play(cur.channels[0]));
+$('#auto').addEventListener('click', () => setAutoplay(!autoplay));
+$('#speed').addEventListener('click', () => setSpeed((speedIdx + 1) % SPEEDS.length));
 
 async function refreshLive() {
   const d = await (await api('/api/live')).json();
@@ -268,6 +376,7 @@ const SERIES = ['#3987e5', '#d95926', '#199e70', '#c98500', '#d55181', '#008300'
                 '#9085e9', '#e66767'];
 let ruleOrder = [], viewOmega = null, frozenOmega = null, lastCurve = null, lastFocus = null;
 const rankCache = {};    // omega -> {r, at}
+const jobs = {rank: null, curve: null};   // running job state, for the progress bars
 const colorOf = rule => SERIES[Math.max(0, ruleOrder.indexOf(rule)) % SERIES.length];
 const nLabeled = () => (cur && cur.n_labeled) || 0;
 
@@ -288,6 +397,8 @@ async function refreshRanking() {
   syncSlider();
   if (d.omega !== viewOmega) return;           // the slider has moved on
   const busy = d.status === 'computing' || d.status === 'queued';
+  jobs.rank = busy ? d : null;
+  drawProgress();
   if (d.result) rankCache[d.omega] = {r: d.result, at: d.at};
   showRanking(busy);
   if (busy) rankTimer = setTimeout(refreshRanking, 1000);
@@ -303,7 +414,28 @@ async function refreshCurve() {
   clearTimeout(curveTimer);
   const d = await (await api('/api/curve?start=1')).json();
   if (d.result) { lastCurve = d.result; ruleOrder = Object.keys(d.result.rules); drawCurve(); }
-  if (d.status === 'computing' || d.status === 'queued') curveTimer = setTimeout(refreshCurve, 1500);
+  const busy = d.status === 'computing' || d.status === 'queued';
+  jobs.curve = busy ? d : null;
+  drawProgress();
+  if (busy) curveTimer = setTimeout(refreshCurve, 1500);
+}
+
+function jobText(j) {
+  const [done, total] = j.progress || [0, null];
+  if (j.status === 'queued' || !total)
+    return `<span class="pbar wait"><i></i></span>${j.status === 'queued' ? 'queued' : 'starting'}`;
+  const pct = Math.round(100 * done / total);
+  return `<span class="pbar"><i style="width:${pct}%"></i></span>${pct}%`;
+}
+
+// Spinner and progress in place of whatever a running job will replace.
+function drawProgress() {
+  const c = jobs.curve, busy = $('#rkcurve .busy');
+  $('#rkcurve').classList.toggle('old', !!c);
+  busy.hidden = !c;
+  if (c) busy.innerHTML = `updating curve ${jobText(c)}`;
+  const u = $('#ranking .upd');
+  if (u) u.innerHTML = jobs.rank ? jobText(jobs.rank) : '';
 }
 
 function syncSlider() {
@@ -326,6 +458,10 @@ function setOmega(w) {
   syncSlider();
   drawCurve();
   showRanking(true);
+  if (!rankCache[w] || rankCache[w].at !== nLabeled()) {
+    jobs.rank = {status: 'queued'};
+    drawProgress();
+  }
   clearTimeout(slideTimer);
   slideTimer = setTimeout(refreshRanking, 250);
 }
@@ -363,7 +499,10 @@ function drawCurve() {
          `S<tspan baseline-shift="sub" font-size="7">\u03c9</tspan> (%)</text>`;
   if (f) {
     const up = pts2(c.rules[f].hi), dn = pts2(c.rules[f].lo).reverse();
-    svg += `<polygon points="${up.concat(dn).join(' ')}" fill="${colorOf(f)}" opacity=".16"/>`;
+    svg += `<polygon points="${up.concat(dn).join(' ')}" fill="${colorOf(f)}" opacity=".3"/>`;
+    for (const edge of [up, dn])
+      svg += `<polyline points="${edge.join(' ')}" fill="none" stroke="${colorOf(f)}" ` +
+             `stroke-width=".8" stroke-dasharray="2 2" opacity=".8"/>`;
   }
   svg += names.filter(r => r !== f).map(r => line(r, 1.5, f ? 0.45 : 0.9)).join('');
   if (f) svg += line(f, 2.5, 1);
@@ -483,6 +622,7 @@ function focusPair(p, f) {
 
 function drawRanking(r, stale, explore = false) {
   lastRank = {r, stale, explore};
+  $('#ranking').classList.toggle('old', stale);
   if (!ruleOrder.length) ruleOrder = r.rules.map(x => x.rule);
   const tier = tiers(r);
   const t = x => ({unranked: 1e6, conflict: 1e6 + 1})[tier[x.rule]] ?? tier[x.rule];
@@ -504,7 +644,7 @@ function drawRanking(r, stale, explore = false) {
   $('#ranking').innerHTML =
     `<div class="hd">S<sub>ω</sub> at ω=${r.omega}, δ=${r.delta}, n=${r.n}` +
     `${explore ? '<span class="xp">exploratory</span>' : ''}` +
-    `${stale ? ' <span class="stale">(updating)</span>' : ''}</div>` +
+    `<span class="upd"></span></div>` +
     `<table>${rules.map((x, i) => {
       const k = tier[x.rule], named = typeof k === 'string';
       const head = named && (i === 0 || t(rules[i - 1]) !== t(x))
@@ -517,6 +657,7 @@ function drawRanking(r, stale, explore = false) {
     `<div class="hd">pairwise, simultaneous at α=${r.alpha}` +
     `<span class="tog" data-toggle="1">${showAll ? f : 'all pairs'}</span></div>` +
     list.join('');
+  drawProgress();
 }
 
 $('#ranking').addEventListener('click', e => {
@@ -652,6 +793,10 @@ addEventListener('keydown', e => {
   else if (e.key === 'c' || e.key === 'f') $('#flag').click();
   else if (e.key === 'r') openReport();
   else if (e.key === 'ArrowLeft') undo();
+  else if (e.key === 'p') $('#play').click();
+  else if (e.key === '[') setSpeed(speedIdx + 1);
+  else if (e.key === ']') setSpeed(speedIdx - 1);
+  else if (e.key === 'P') setAutoplay(!autoplay);
 });
 
 api('/api/meta').then(r => r.json()).then(m => { document.title = `vox label: ${m.name}`; });

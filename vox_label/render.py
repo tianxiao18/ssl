@@ -75,10 +75,18 @@ def to_jpeg(gray, disp_w=900, jpeg_q=72):
 class PngChunkSource:
     """Crops stitched from per-second chunk PNGs."""
 
-    def __init__(self, spec_root, dataset, prefix="headmic"):
+    def __init__(self, spec_root, dataset, prefix="headmic", data_root="data"):
         self.root = Path(spec_root) / dataset
+        self.data = Path(data_root) / dataset
         self.prefix = prefix
         self._index = {}
+
+    def wav_path(self, clip, ch):
+        """The WAV a channel's chunks were cut from: chunk names are '<wav stem>_chunk_...'."""
+        chunks = self._clip_index(clip).get(ch)
+        if not chunks:
+            raise KeyError(f"no spectrogram chunks for {clip} ch{ch}")
+        return self.data / clip / (chunks[0][0].name.split("_chunk_")[0] + ".wav")
 
     def channels(self, clip):
         return sorted(self._clip_index(clip))
@@ -110,10 +118,23 @@ class PngChunkSource:
 class H5Source:
     """Crops column-sliced from a per-recording HDF5 spectrogram."""
 
-    def __init__(self, spec_root, dataset, suffix=".h5"):
+    def __init__(self, spec_root, dataset, suffix=".h5", data_root="data"):
         self.root = Path(spec_root) / dataset
+        self.data = Path(data_root) / dataset
         self.suffix = suffix
         self._open = {}
+
+    def _h5_path(self, clip, ch):
+        matches = sorted((self.root / clip).glob(f"*_{ch}_*{self.suffix}"))
+        if not matches:
+            matches = sorted((self.root / clip).glob(f"*{self.suffix}"))
+        if not matches:
+            raise KeyError(f"no HDF5 spectrogram for {clip} ch{ch}")
+        return matches[0]
+
+    def wav_path(self, clip, ch):
+        """The WAV this channel's HDF5 was made from: same stem."""
+        return self.data / clip / (self._h5_path(clip, ch).stem + ".wav")
 
     def channels(self, clip):
         import re
@@ -128,12 +149,7 @@ class H5Source:
         key = (clip, ch)
         if key not in self._open:
             import h5py
-            matches = sorted((self.root / clip).glob(f"*_{ch}_*{self.suffix}"))
-            if not matches:
-                matches = sorted((self.root / clip).glob(f"*{self.suffix}"))
-            if not matches:
-                raise KeyError(f"no HDF5 spectrogram for {clip} ch{ch}")
-            f = h5py.File(matches[0], "r")
+            f = h5py.File(self._h5_path(clip, ch), "r")
             self._open[key] = (f, f["t"][:])
         return self._open[key]
 

@@ -338,11 +338,12 @@ def corpus_stats(pool_rows, rules, rule_fns):
     return {"a_r": a_r, "patterns": pats}
 
 
-def rank(annotations, rules, rule_fns, corpus, omega, delta, alpha, a_star=0.5):
+def rank(annotations, rules, rule_fns, corpus, omega, delta, alpha, a_star=0.5,
+         progress=None):
     """Per-rule CSs at alpha and the partial order at alpha / #pairs (eq. 11).
 
     `annotations` must be in committed order, as Campaign.annotations returns them;
-    `corpus` comes from corpus_stats.
+    `corpus` comes from corpus_stats. `progress(done, total)` is called per rule and pair.
     """
     x = np.array([a["label"] for a in annotations], float)
     dec = {r: np.array([bool(rule_fns[r](a["z"])) for a in annotations], float)
@@ -351,8 +352,19 @@ def rank(annotations, rules, rule_fns, corpus, omega, delta, alpha, a_star=0.5):
     pairs = list(combinations(rules, 2))
     alpha_pair = alpha / max(len(pairs), 1)
 
-    per_rule = [{"rule": r, "a_r": a_r[r],
-                 **rule_cs(x, dec[r], omega, alpha, a_r[r], a_star)} for r in rules]
+    total, done = len(rules) + len(pairs), 0
+
+    def tick():
+        nonlocal done
+        done += 1
+        if progress:
+            progress(done, total)
+
+    per_rule = []
+    for r in rules:
+        per_rule.append({"rule": r, "a_r": a_r[r],
+                         **rule_cs(x, dec[r], omega, alpha, a_r[r], a_star)})
+        tick()
 
     out_pairs = []
     for j, k in pairs:
@@ -364,6 +376,7 @@ def rank(annotations, rules, rule_fns, corpus, omega, delta, alpha, a_star=0.5):
         out_pairs.append({"a": j, "b": k, "p_dis": p_dis,
                           "plan_n": plan_pair(p_dis, d_j, d_k, delta, omega, alpha_pair),
                           **res})
+        tick()
     return _plain({"omega": omega, "delta": delta, "alpha": alpha,
                    "alpha_pair": alpha_pair, "a_star_guess": a_star, "n": len(x),
                    "rules": per_rule, "pairs": out_pairs})
@@ -386,12 +399,18 @@ def omega_grid(frozen=None, step=0.05):
     return sorted(grid)
 
 
-def curve(annotations, rules, rule_fns, corpus, omegas, alpha, a_star=0.5):
+def curve(annotations, rules, rule_fns, corpus, omegas, alpha, a_star=0.5,
+          progress=None):
     """S_omega and its pointwise CS for every rule at every omega (exploration only)."""
     x = np.array([a["label"] for a in annotations], float)
     out = {"omegas": list(omegas), "n": len(x), "alpha": alpha, "rules": {}}
-    for r in rules:
+    total = len(rules) * len(omegas)
+    for i, r in enumerate(rules):
         dec = np.array([bool(rule_fns[r](a["z"])) for a in annotations], float)
-        rows = [rule_cs(x, dec, w, alpha, corpus["a_r"][r], a_star) for w in omegas]
+        rows = []
+        for w in omegas:
+            rows.append(rule_cs(x, dec, w, alpha, corpus["a_r"][r], a_star))
+            if progress:
+                progress(i * len(omegas) + len(rows), total)
         out["rules"][r] = {k: [row[k] for row in rows] for k in ("estimate", "lo", "hi")}
     return _plain(out)
