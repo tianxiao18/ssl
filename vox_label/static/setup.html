@@ -127,10 +127,10 @@ async function boot() {
   $('dataset').onchange = () => { fillPools(); onPool(); renderCampaigns(); };
   $('pool').onchange = onPool;
   for (const k of GRID) if (S.grid_defaults[k] != null) $(k).value = S.grid_defaults[k];
-  if (S.current && S.current.bound) {
+  // --annotator applies before any campaign is bound, not only after.
+  if (S.current && S.current.annotator) $('annotator').value = S.current.annotator;
+  if (S.current && S.current.bound)
     $('current').textContent = `labeling ${S.current.name} (${fmt(S.current.n_labeled)} labeled)`;
-    $('annotator').value = S.current.annotator;
-  }
   fillPools(); onPool(); renderCampaigns();
 }
 

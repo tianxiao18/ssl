@@ -21,7 +21,7 @@
   .blind{font-size:10.5px;color:var(--dim);border:1px solid var(--line);
          border-radius:999px;padding:1px 8px}
 
-  /* Fixed-height grid: spectrograms left, live scores right. Nothing scrolls. */
+  /* Fixed-height grid: spectrograms left, estimates right. Nothing scrolls. */
   .wrap{height:calc(100vh - var(--hdr) - var(--ftr));display:grid;
         grid-template-columns:1fr 430px;gap:10px;padding:8px 12px}
   .left{display:flex;flex-direction:column;min-height:0;gap:6px}
@@ -119,6 +119,28 @@
   .rk tr.pick.on td{background:#262a38}
   .rk tr.pick.on td:nth-child(2){color:var(--real);font-weight:600}
   .rk .tog{float:right;cursor:pointer;color:var(--real);user-select:none}
+  #rkcurve{position:relative;margin-top:6px}
+  #rkcurve svg{display:block;width:100%;height:auto;cursor:crosshair}
+  #rkcurve text{fill:var(--dim);font-size:9px}
+  #rkcurve .tip{position:absolute;top:0;pointer-events:none;background:#0f1016;
+                border:1px solid var(--line);border-radius:4px;padding:4px 7px;
+                font-size:10.5px;font-variant-numeric:tabular-nums;white-space:nowrap;z-index:2}
+  /* The slider is placed by JS so its thumb travels exactly the chart's omega axis;
+     a fixed 12px thumb makes that offset known. */
+  #rkcurve .sl{position:relative;height:16px;margin-bottom:2px}
+  #omega{position:absolute;top:0;height:16px;margin:0;background:transparent;
+         -webkit-appearance:none;appearance:none}
+  #omega::-webkit-slider-runnable-track{height:4px;background:var(--line);border-radius:2px}
+  #omega::-webkit-slider-thumb{-webkit-appearance:none;width:12px;height:12px;margin-top:-4px;
+                               border:0;border-radius:50%;background:var(--real)}
+  #omega::-moz-range-track{height:4px;background:var(--line);border-radius:2px}
+  #omega::-moz-range-thumb{width:12px;height:12px;border:0;border-radius:50%;background:var(--real)}
+  #rkcurve text.ax{fill:var(--ink);font-size:9.5px}
+  .rk .xp{color:var(--fake);font-size:10px;margin-left:4px}
+  #ranking.explore .rel,#ranking.explore td.rank{color:var(--dim)}
+  .rk td.rank + td{text-align:left}
+  .rk i.sw{display:inline-block;width:10px;height:3px;border-radius:2px;margin-right:6px;
+           vertical-align:middle}
   .err{color:var(--fake);white-space:pre-wrap;font-family:ui-monospace,monospace;font-size:11.5px}
 </style>
 
@@ -138,8 +160,10 @@
     <div class="stack" id="frames"></div>
   </div>
   <div class="right">
-    <h2>live scores, anytime-valid</h2>
-    <div class="scroll"><div class="rk" id="ranking"></div><table id="live"><thead><tr>
+    <h2>anytime-valid performance estimates</h2>
+    <div class="scroll"><div class="rk"><div id="rkcurve"><div class="plot"></div><div class="tip" hidden></div>
+      <div class="sl"><input type="range" id="omega" min="0" max="20" step="1"></div></div>
+      <div id="ranking"></div></div><table id="live"><thead><tr>
       <th>rule</th><th>n</th><th>est</th><th>interval</th><th></th>
     </tr></thead><tbody></tbody></table></div>
   </div>
@@ -174,6 +198,7 @@ function render(d) {
   $('#ndone').textContent = d.n_labeled ?? 0;
   $('#tonext').textContent = d.to_next_reveal ?? '?';
   refreshLive();
+  refreshCurve();
   refreshRanking();
 
   if (d.done) {
@@ -235,14 +260,142 @@ async function refreshLive() {
 const REL = {succ_delta: '\u227b\u03b4', approx: '\u2248\u03b4', succ: '\u227b',
              unresolved: '\u22c8'};
 const pts = v => v == null ? '?' : (100 * v).toFixed(1);
-let rankTimer = null;
+let rankTimer = null, curveTimer = null, slideTimer = null;
+
+// Series colors in campaign rule order, so a rule keeps its color whatever its rank.
+// Dark-mode reference palette, validated against the panel surface #1b1d27.
+const SERIES = ['#3987e5', '#d95926', '#199e70', '#c98500', '#d55181', '#008300',
+                '#9085e9', '#e66767'];
+let ruleOrder = [], viewOmega = null, frozenOmega = null, lastCurve = null, lastFocus = null;
+const rankCache = {};    // omega -> {r, at}
+const colorOf = rule => SERIES[Math.max(0, ruleOrder.indexOf(rule)) % SERIES.length];
+const nLabeled = () => (cur && cur.n_labeled) || 0;
+
+// Same grid as ranking.omega_grid: steps of 0.05 plus the frozen omega.
+function omegaGrid() {
+  const g = new Set(Array.from({length: 21}, (_, i) => +(i * 0.05).toFixed(4)));
+  if (frozenOmega != null) g.add(frozenOmega);
+  return [...g].sort((a, b) => a - b);
+}
 
 async function refreshRanking() {
   clearTimeout(rankTimer);
-  const d = await (await api('/api/ranking?start=1')).json();
+  const q = viewOmega == null ? '' : `&omega=${viewOmega}`;
+  const d = await (await api('/api/ranking?start=1' + q)).json();
   if (d.status === 'error') { $('#ranking').innerHTML = `<div class="err">${d.error}</div>`; return; }
-  if (d.result) drawRanking(d.result, d.status === 'computing' || d.at !== (cur && cur.n_labeled));
-  if (d.status === 'computing') rankTimer = setTimeout(refreshRanking, 1000);
+  frozenOmega = d.frozen_omega;
+  if (viewOmega == null) viewOmega = d.omega;
+  syncSlider();
+  if (d.omega !== viewOmega) return;           // the slider has moved on
+  const busy = d.status === 'computing' || d.status === 'queued';
+  if (d.result) rankCache[d.omega] = {r: d.result, at: d.at};
+  showRanking(busy);
+  if (busy) rankTimer = setTimeout(refreshRanking, 1000);
+}
+
+function showRanking(busy) {
+  const c = rankCache[viewOmega];
+  if (c) drawRanking(c.r, busy || c.at !== nLabeled(), viewOmega !== frozenOmega);
+  else if (lastRank) drawRanking(lastRank.r, true, lastRank.explore);
+}
+
+async function refreshCurve() {
+  clearTimeout(curveTimer);
+  const d = await (await api('/api/curve?start=1')).json();
+  if (d.result) { lastCurve = d.result; ruleOrder = Object.keys(d.result.rules); drawCurve(); }
+  if (d.status === 'computing' || d.status === 'queued') curveTimer = setTimeout(refreshCurve, 1500);
+}
+
+function syncSlider() {
+  const g = omegaGrid(), el = $('#omega');
+  el.max = g.length - 1;
+  if (viewOmega != null) el.value = g.indexOf(viewOmega);
+}
+
+// Chart geometry (SVG units). The slider spans [L, W - R] so it lines up with the axis.
+const CV = {W: 400, H: 154, L: 40, R: 8, T: 14, B: 30};
+(() => {
+  const el = $('#omega');
+  el.style.left = `calc(${100 * CV.L / CV.W}% - 6px)`;
+  el.style.width = `calc(${100 * (CV.W - CV.L - CV.R) / CV.W}% + 12px)`;
+})();
+
+function setOmega(w) {
+  if (w === viewOmega) return;
+  viewOmega = w;
+  syncSlider();
+  drawCurve();
+  showRanking(true);
+  clearTimeout(slideTimer);
+  slideTimer = setTimeout(refreshRanking, 250);
+}
+
+$('#omega').addEventListener('input', e => setOmega(omegaGrid()[+e.target.value]));
+// Give the labeling keys back once the slider is let go.
+$('#omega').addEventListener('change', e => e.target.blur());
+
+function drawCurve() {
+  const c = lastCurve;
+  if (!c) return;
+  const {W, H, L, R, T, B} = CV;
+  const om = c.omegas, names = Object.keys(c.rules);
+  const f = lastFocus && c.rules[lastFocus] ? lastFocus : null;
+  const vals = names.flatMap(r => c.rules[r].estimate)
+    .concat(f ? c.rules[f].lo.concat(c.rules[f].hi) : []).filter(v => v != null);
+  if (!vals.length) return;
+  const y0 = Math.max(0, Math.floor((Math.min(...vals) - 0.02) * 10) / 10);
+  const y1 = Math.min(1, Math.ceil((Math.max(...vals) + 0.02) * 10) / 10);
+  const X = w => L + (W - L - R) * w, Y = v => T + (H - T - B) * (1 - (v - y0) / (y1 - y0));
+  const pts2 = (arr, ws = om) => arr.map((v, i) => v == null ? null
+    : `${X(ws[i]).toFixed(1)},${Y(v).toFixed(1)}`).filter(Boolean);
+  const line = (r, w, op) => `<polyline points="${pts2(c.rules[r].estimate).join(' ')}" fill="none" ` +
+    `stroke="${colorOf(r)}" stroke-width="${w}" stroke-linejoin="round" opacity="${op}"/>`;
+  const ticks = [y0, (y0 + y1) / 2, y1];
+  let svg = ticks.map(v => `<line x1="${L}" x2="${W - R}" y1="${Y(v)}" y2="${Y(v)}" stroke="var(--line)"/>` +
+    `<text x="${L - 4}" y="${Y(v) + 3}" text-anchor="end">${Math.round(100 * v)}</text>`).join('');
+  // Two tick rows: omega itself, then what it means at the landmarks. A name is
+  // shifted inward just enough to stay inside the chart.
+  const fit = (x, txt) => Math.min(Math.max(x, txt.length * 2.6), W - txt.length * 2.6);
+  svg += [0, 0.5, 1].map(w => `<text x="${X(w)}" y="${H - B + 11}" text-anchor="middle">${w}</text>`).join('');
+  svg += [[0, 'recall'], [0.5, 'F1'], [1, 'precision']].map(([w, t]) =>
+    `<text x="${fit(X(w), t)}" y="${H - B + 22}" text-anchor="middle" opacity=".75">${t}</text>`).join('');
+  svg += `<text class="ax" transform="translate(9 ${(T + H - B) / 2}) rotate(-90)" text-anchor="middle">` +
+         `S<tspan baseline-shift="sub" font-size="7">\u03c9</tspan> (%)</text>`;
+  if (f) {
+    const up = pts2(c.rules[f].hi), dn = pts2(c.rules[f].lo).reverse();
+    svg += `<polygon points="${up.concat(dn).join(' ')}" fill="${colorOf(f)}" opacity=".16"/>`;
+  }
+  svg += names.filter(r => r !== f).map(r => line(r, 1.5, f ? 0.45 : 0.9)).join('');
+  if (f) svg += line(f, 2.5, 1);
+  if (frozenOmega != null)
+    svg += `<line x1="${X(frozenOmega)}" x2="${X(frozenOmega)}" y1="${T}" y2="${H - B}" ` +
+           `stroke="var(--dim)" stroke-dasharray="3 3"/>`;
+  if (viewOmega != null)
+    svg += `<line x1="${X(viewOmega)}" x2="${X(viewOmega)}" y1="${T}" y2="${H - B}" ` +
+           `stroke="var(--ink)" stroke-width="1.5" opacity=".8"/>` +
+           `<text class="ax" x="${X(viewOmega)}" y="${T - 4}" text-anchor="${
+             viewOmega < 0.12 ? 'start' : viewOmega > 0.88 ? 'end' : 'middle'}">` +
+           `\u03c9 = ${viewOmega.toFixed(2)}</text>`;
+  svg += `<rect class="hit" x="${L}" y="0" width="${W - L - R}" height="${H}" fill="transparent"/>`;
+  $('#rkcurve .plot').innerHTML = `<svg viewBox="0 0 ${W} ${H}">${svg}</svg>`;
+  const el = $('#rkcurve svg'), tip = $('#rkcurve .tip');
+  const nearest = e => {
+    const b = el.getBoundingClientRect();
+    const w = ((e.clientX - b.left) / b.width * W - L) / (W - L - R);
+    return om.reduce((a, x) => Math.abs(x - w) < Math.abs(a - w) ? x : a, om[0]);
+  };
+  el.onmousemove = e => {
+    const w = nearest(e), i = om.indexOf(w);
+    const rows = names.map(r => [r, c.rules[r].estimate[i]]).filter(x => x[1] != null)
+      .sort((a, b) => b[1] - a[1]);
+    tip.innerHTML = `<div style="color:var(--dim)">\u03c9 = ${w.toFixed(2)}</div>` + rows.map(([r, v]) =>
+      `<div><i class="sw" style="background:${colorOf(r)}"></i>${r} ${pct(v)}</div>`).join('');
+    tip.hidden = false;
+    const b = el.getBoundingClientRect(), x = e.clientX - b.left;
+    tip.style.left = (x > b.width / 2 ? x - tip.offsetWidth - 10 : x + 10) + 'px';
+  };
+  el.onmouseleave = () => { tip.hidden = true; };
+  el.onclick = e => setOmega(nearest(e));
 }
 
 // Tiers from settled "better" verdicts (and chains of them). A boundary between tiers
@@ -328,13 +481,16 @@ function focusPair(p, f) {
   return pairRow(f, sym, other, p, flip);
 }
 
-function drawRanking(r, stale) {
-  lastRank = {r, stale};
+function drawRanking(r, stale, explore = false) {
+  lastRank = {r, stale, explore};
+  if (!ruleOrder.length) ruleOrder = r.rules.map(x => x.rule);
   const tier = tiers(r);
   const t = x => ({unranked: 1e6, conflict: 1e6 + 1})[tier[x.rule]] ?? tier[x.rule];
   const rules = [...r.rules].sort((a, b) => t(a) - t(b) || (b.estimate ?? -1) - (a.estimate ?? -1));
   if (!rules.some(x => x.rule === focusRule)) focusRule = null;
   const f = focusRule ?? rules[0].rule;
+  if (f !== lastFocus) { lastFocus = f; drawCurve(); }
+  $('#ranking').classList.toggle('explore', explore);
   const pos = Object.fromEntries(rules.map((x, i) => [x.rule, i]));
   const bar = x => x.lo == null ? '' :
     `<div class="bar"><i style="left:${100 * x.lo}%;width:${100 * (x.hi - x.lo)}%"></i>` +
@@ -347,13 +503,15 @@ function drawRanking(r, stale) {
         .map(p => focusPair(p, f));
   $('#ranking').innerHTML =
     `<div class="hd">S<sub>ω</sub> at ω=${r.omega}, δ=${r.delta}, n=${r.n}` +
+    `${explore ? '<span class="xp">exploratory</span>' : ''}` +
     `${stale ? ' <span class="stale">(updating)</span>' : ''}</div>` +
     `<table>${rules.map((x, i) => {
       const k = tier[x.rule], named = typeof k === 'string';
       const head = named && (i === 0 || t(rules[i - 1]) !== t(x))
         ? `<tr class="lbl"><td colspan="5">${k === 'conflict' ? 'conflicting verdicts' : 'unranked'}</td></tr>` : '';
       return head + `<tr data-rule="${x.rule}" class="pick${x.rule === f ? ' on' : ''}">` +
-        `<td class="rank">${named ? '–' : k}</td><td>${x.rule}</td><td>${pct(x.estimate)}</td>` +
+        `<td class="rank">${named ? '–' : k}</td>` +
+        `<td><i class="sw" style="background:${colorOf(x.rule)}"></i>${x.rule}</td><td>${pct(x.estimate)}</td>` +
         `<td>${pct(x.lo)}–${pct(x.hi)}</td><td>${bar(x)}</td></tr>`;
     }).join('')}</table>` +
     `<div class="hd">pairwise, simultaneous at α=${r.alpha}` +
@@ -366,7 +524,7 @@ $('#ranking').addEventListener('click', e => {
   if (row) { focusRule = row.dataset.rule; showAll = false; }
   else if (e.target.closest('[data-toggle]')) showAll = !showAll;
   else return;
-  if (lastRank) drawRanking(lastRank.r, lastRank.stale);
+  if (lastRank) drawRanking(lastRank.r, lastRank.stale, lastRank.explore);
 });
 
 async function submit(label) {

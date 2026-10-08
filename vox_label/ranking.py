@@ -376,3 +376,22 @@ def _plain(v):
     if isinstance(v, (list, tuple)):
         return [_plain(u) for u in v]
     return v.item() if isinstance(v, np.generic) else v
+
+
+def omega_grid(frozen=None, step=0.05):
+    """The omegas the GUI can show: a fixed grid plus the frozen one."""
+    grid = {round(i * step, 4) for i in range(int(round(1 / step)) + 1)}
+    if frozen is not None:
+        grid.add(round(float(frozen), 4))
+    return sorted(grid)
+
+
+def curve(annotations, rules, rule_fns, corpus, omegas, alpha, a_star=0.5):
+    """S_omega and its pointwise CS for every rule at every omega (exploration only)."""
+    x = np.array([a["label"] for a in annotations], float)
+    out = {"omegas": list(omegas), "n": len(x), "alpha": alpha, "rules": {}}
+    for r in rules:
+        dec = np.array([bool(rule_fns[r](a["z"])) for a in annotations], float)
+        rows = [rule_cs(x, dec, w, alpha, corpus["a_r"][r], a_star) for w in omegas]
+        out["rules"][r] = {k: [row[k] for row in rows] for k in ("estimate", "lo", "hi")}
+    return _plain(out)

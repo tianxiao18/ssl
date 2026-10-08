@@ -9,6 +9,20 @@ analysis and clustering/UMAP visualization.
 `scripts/` follows the pipeline: spectrograms → segmentation → (optional)
 evaluation/comparison at the top level, everything else in a subfolder.
 
+## Setup
+
+```bash
+source venv/bin/activate
+pip install -r requirements.txt
+git clone https://github.com/facebookresearch/sam3.git
+pip install -e sam3/ --no-deps
+hf auth login
+hf download facebook/sam3 --local-dir sam3
+pip install inference==1.2.12 --no-deps
+```
+
+First-time SAM3 users must request access at https://huggingface.co/facebook/sam3 before `hf download` will work.
+
 ## Main pipeline
 
 ### Step 1 — Generate spectrograms
@@ -42,7 +56,7 @@ python scripts/run.py ridge outputs/ridge_flatness --dataset gerbil_ssl --all --
 python scripts/run.py squeakout outputs/squeakout --dataset gerbil_ssl --all --workers 1 --checkpoint squeakout/squeakout_weights.ckpt
 ```
 
-**SAM3** (requires `pip install -e sam3/ --no-deps` and checkpoint):
+**SAM3** (code cloned from facebookresearch/sam3, weights `sam3/sam3.pt` from Hugging Face):
 ```bash
 python scripts/run.py sam3 outputs/sam3 --dataset gerbil_ssl --all --sam3-checkpoint sam3/sam3.pt
 ```

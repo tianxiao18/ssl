@@ -35,7 +35,7 @@ from urllib.parse import parse_qs, urlparse
 from vox_label import setup as setup_mod
 from vox_label.anytime import cs_interval
 from vox_label.exact_grid import GammaCache, exact_grid_interval, f1_from_jaccard
-from vox_label.ranking import corpus_stats, rank
+from vox_label.ranking import corpus_stats, curve, omega_grid, rank
 from vox_label.render import band_rows, clip_channels, to_jpeg
 from vox_label.streams import STREAM_KINDS, counts_at
 
@@ -61,8 +61,9 @@ class LabelService:
         self._gamma = {}
         self._report = {"status": "idle", "at": None, "rows": []}
         self._report_thread = None
-        self._ranking = {"status": "idle", "at": None}
-        self._ranking_thread = None
+        self._jobs = {}          # (kind, omega) -> {"status", "at", "result"}
+        self._queue = []         # keys waiting, newest first
+        self._worker = None
         self._corpus = None
 
     # ── labeling ────────────────────────────────────────────────────────────────
@@ -238,41 +239,86 @@ class LabelService:
 
     # ── the partial order of main.pdf: anytime-valid, recomputed as labels arrive ──
 
-    def compute_ranking(self):
+    def _ranking_setup(self):
         params = self.c.ranking_params()
-        if params is None:
-            return None
-        if self._corpus is None:
+        if params is not None and self._corpus is None:
             self._corpus = corpus_stats(list(self.c.pool.values()), self.c.rules,
                                         {r: self.c.rule_fn(r) for r in self.c.rules})
+        return params
+
+    def compute_ranking(self, omega=None):
+        params = self._ranking_setup()
+        if params is None:
+            return None
         return rank(self.c.annotations(self.labels), self.c.rules,
                     {r: self.c.rule_fn(r) for r in self.c.rules}, self._corpus,
-                    params["omega"], params["delta"], self.c.alpha,
-                    params.get("a_star_guess", 0.5))
+                    params["omega"] if omega is None else omega, params["delta"],
+                    self.c.alpha, params.get("a_star_guess", 0.5))
 
-    def ranking(self, start=False):
-        """Latest ranking; with `start`, recompute in the background if it is stale.
+    def compute_curve(self):
+        params = self._ranking_setup()
+        if params is None:
+            return None
+        return curve(self.c.annotations(self.labels), self.c.rules,
+                     {r: self.c.rule_fn(r) for r in self.c.rules}, self._corpus,
+                     omega_grid(params["omega"]), self.c.alpha,
+                     params.get("a_star_guess", 0.5))
 
-        A pass over every pair takes about a second, too long for the label request.
-        """
+    def ranking(self, start=False, omega=None):
+        """Latest ranking at `omega` (default: the frozen one). Only the frozen omega
+        carries the guarantee; any other is exploratory, and the result says which."""
+        params = self.c.ranking_params()
+        frozen = None if params is None else round(params["omega"], 4)
+        w = frozen if omega is None else round(float(omega), 4)
+        state = self._job(("rank", w), start)
+        return {**state, "omega": w, "frozen_omega": frozen, "exploratory": w != frozen}
+
+    def curve(self, start=False):
+        return self._job(("curve", None), start)
+
+    def _job(self, key, start):
+        """Cached state of a background job; with `start`, queue it if stale.
+
+        One worker, newest request first, so dragging the slider does not pile up
+        seconds-long passes."""
         with self.lock:
-            state = dict(self._ranking)
-            busy = self._ranking_thread is not None and self._ranking_thread.is_alive()
             n = len(self.labels)
-        if start and not busy and state.get("at") != n:
-            self._ranking = {**state, "status": "computing"}
-            self._ranking_thread = threading.Thread(target=self._run_ranking, args=(n,),
-                                                    daemon=True)
-            self._ranking_thread.start()
-            state["status"] = "computing"
+            state = dict(self._jobs.get(key, {"status": "idle", "at": None}))
+            if start and state.get("at") != n and state["status"] != "computing":
+                if key in self._queue:
+                    self._queue.remove(key)
+                self._queue.insert(0, key)
+                state["status"] = "queued"
+                if self._worker is None or not self._worker.is_alive():
+                    self._worker = threading.Thread(target=self._work, daemon=True)
+                    self._worker.start()
+            elif key in self._queue:
+                state["status"] = "queued"
         return state
 
-    def _run_ranking(self, n):
-        try:
-            self._ranking = {"status": "ready", "at": n, "result": self.compute_ranking()}
-        except Exception:
-            self._ranking = {"status": "error", "at": None,
-                             "error": traceback.format_exc(limit=3)}
+    def _work(self):
+        while True:
+            with self.lock:
+                if not self._queue:
+                    return
+                key = self._queue.pop(0)
+                n = len(self.labels)
+                prev = self._jobs.get(key, {})
+                self._jobs[key] = {**prev, "status": "computing"}
+            try:
+                kind, w = key
+                result = self.compute_ranking(w) if kind == "rank" else self.compute_curve()
+                done = {"status": "ready", "at": n, "result": result}
+            except Exception:
+                done = {"status": "error", "at": None,
+                        "error": traceback.format_exc(limit=3)}
+            with self.lock:
+                self._jobs[key] = done
+
+    def wait(self):
+        """Block until queued jobs are done (tests)."""
+        while self._worker is not None and self._worker.is_alive():
+            self._worker.join()
 
     # ── crops ───────────────────────────────────────────────────────────────────
 
@@ -438,7 +484,10 @@ def make_handler(session):
                     return self._send(200, svc.report(start=start))
                 if u.path == "/api/ranking":
                     start = q.get("start", ["0"])[0] == "1"
-                    return self._send(200, svc.ranking(start=start))
+                    return self._send(200, svc.ranking(start=start,
+                                                       omega=q.get("omega", [None])[0]))
+                if u.path == "/api/curve":
+                    return self._send(200, svc.curve(start=q.get("start", ["0"])[0] == "1"))
                 if u.path == "/api/crop":
                     jpg, a, b = svc.crop_jpeg(q["cand_id"][0], q["ch"][0])
                     return self._send(200, jpg, "image/jpeg",
