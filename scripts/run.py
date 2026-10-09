@@ -42,15 +42,12 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
-DATASETS = ("gerbil_ssl", "dryad_gerbil", "gerbil_family", "dryad_gerbil_full", "mongolia_wild_data",
-            "dryad_gerbil_full_smoketest")
+from vox_tracer.paths import discover_channels, discover_recordings
 
 
-def _discover(base):
-    """Yield (rel_path, abs_idx_dir) for every experiment_*/idx_* under base."""
-    for exp_dir in sorted(Path(base).glob("experiment_*")):
-        for idx_dir in sorted(exp_dir.glob("idx_*")):
-            yield Path(exp_dir.name) / idx_dir.name, idx_dir
+def _discover(base, prefix="headmic"):
+    """Yield (rel_path, abs_dir) for every dir under base (any depth) holding {prefix}_*.png."""
+    yield from discover_recordings(base, f"{prefix}_*.png")
 
 
 def _discover_h5(base, channels, prefix):
@@ -93,11 +90,12 @@ sub = parser.add_subparsers(dest="model", required=True)
 def _add_spec_args(p):
     p.add_argument("out_dir", help="stage/variant name, e.g. outputs/ridge_flatness "
                                     "(dataset is appended automatically)")
-    p.add_argument("--dataset", required=True, choices=DATASETS)
+    p.add_argument("--dataset", required=True, help="any dataset under outputs/spectrograms[_h5]/")
     p.add_argument("--recording", default=None,
                    help="single experiment_X/idx_Y to process (omit and pass --all instead "
                         "to process every recording in the dataset)")
-    p.add_argument("--channels", default="118,35")
+    p.add_argument("--channels", default=None,
+                   help="comma-separated channel ids (default: every channel found in the spectrograms)")
     p.add_argument("--prefix",  default="headmic",
                    help="recording-stream filename prefix, matching '{prefix}_{ch}_..._t{t0}-{t1}.png' "
                         "spectrograms and '{prefix}_{ch}_*.wav' audio (default: headmic, the gerbil_ssl "
@@ -210,7 +208,7 @@ p_sam3.add_argument("--chunk-sec", type=float, default=1.0,
 p_yolo = sub.add_parser("das_yolo", help="DAS-guided YOLO detection")
 p_yolo.add_argument("out_dir", help="stage/variant name, e.g. outputs/das_yolo "
                                      "(dataset is appended automatically)")
-p_yolo.add_argument("--dataset", required=True, choices=DATASETS)
+p_yolo.add_argument("--dataset", required=True)
 p_yolo.add_argument("--recording", default=None,
                     help="single experiment_X/idx_Y to process (omit and pass --all instead "
                          "to process every recording in the dataset)")
@@ -221,11 +219,12 @@ p_yolo.add_argument("--all",       action="store_true",
 p_yolo.add_argument("--workers",   type=int, default=1)
 
 args = parser.parse_args()
-channels = [int(c) for c in args.channels.split(",")]
+if args.model == "das_yolo" and not args.channels:
+    parser.error("das_yolo requires --channels")
 
 # Build model kwargs
 if args.model == "ridge":
-    kw = dict(channels=channels, filter_name=args.filter,
+    kw = dict(filter_name=args.filter,
               sigmas=[float(s) for s in args.sigmas.split(",")],
               threshold_pct=args.threshold_pct,
               sample_rate=args.sample_rate, freq_min=args.freq_min,
@@ -237,7 +236,7 @@ if args.model == "ridge":
               max_flatness=args.max_flatness,
               prefix=args.prefix, chunk_sec=args.chunk_sec)
 elif args.model == "squeakout":
-    kw = dict(channels=channels, checkpoint=args.checkpoint, batch_size=args.batch_size,
+    kw = dict(checkpoint=args.checkpoint, batch_size=args.batch_size,
               mask_threshold=args.mask_threshold, overwrite=args.overwrite,
               recording_dir=args.recording_dir,
               max_mask_area_frac=args.max_mask_area_frac,
@@ -247,7 +246,7 @@ elif args.model == "squeakout":
               max_flatness=args.max_flatness,
               prefix=args.prefix, chunk_sec=args.chunk_sec)
 elif args.model == "sam3":
-    kw = dict(channels=channels, checkpoint=args.sam3_checkpoint,
+    kw = dict(checkpoint=args.sam3_checkpoint,
               sigmas=[float(s) for s in args.sigmas.split(",")],
               threshold_pct=args.threshold_pct, score_threshold=args.score_threshold,
               sample_rate=args.sample_rate, freq_min=args.freq_min,
@@ -264,7 +263,7 @@ elif args.model == "sam3":
               prefix=args.prefix,
               chunk_sec=args.chunk_sec)
 elif args.model == "das_yolo":
-    kw = dict(channels=channels, chunk_sec=args.chunk_sec)
+    kw = dict(chunk_sec=args.chunk_sec)
 
 # sam3, ridge and squeakout auto-detect PNG- vs HDF5-backed datasets: prefer outputs/spectrograms/<dataset>
 # (scripts/gen_spectrograms.py) if it exists, else fall back to
@@ -274,6 +273,17 @@ _h5_base  = Path("outputs") / "spectrograms_h5" / args.dataset
 uses_h5 = (args.model in ("sam3", "ridge", "squeakout")
            and not _png_base.exists() and _h5_base.exists())
 spec_base = _h5_base if uses_h5 else _png_base
+if not spec_base.is_dir():
+    parser.error(f"{spec_base} does not exist -- run scripts/gen_spectrograms.py first")
+if args.channels:
+    kw["channels"] = [int(c) for c in args.channels.split(",")]
+else:
+    _prefix = getattr(args, "prefix", "headmic")
+    _scope = ([spec_base / args.recording] if args.recording else
+              [d for _, d in discover_recordings(spec_base, f"{_prefix}_*.{'h5' if uses_h5 else 'png'}")])
+    kw["channels"] = discover_channels(_scope, _prefix, "h5" if uses_h5 else "png")
+    print(f"channels (auto): {kw['channels']}")
+channels = kw["channels"]
 out_base  = Path(args.out_dir) / args.dataset
 reject_base = (Path(args.reject_out_dir) / args.dataset
                if args.model == "ridge" and args.reject_out_dir else None)
@@ -295,7 +305,7 @@ elif args.all:
         ]
     elif args.model == "ridge" and reject_base:
         discovered = (_discover_h5(spec_base, channels, args.prefix) if uses_h5
-                      else _discover(spec_base))
+                      else _discover(spec_base, args.prefix))
         tasks = [
             (str(idx_dir), str(out_base / rel),
              {**kw, "reject_out_dir": str(reject_base / rel)})
@@ -309,7 +319,7 @@ elif args.all:
     else:
         tasks = [
             (str(idx_dir), str(out_base / rel), kw)
-            for rel, idx_dir in _discover(spec_base)
+            for rel, idx_dir in _discover(spec_base, args.prefix)
         ]
 
     print(f"Found {len(tasks)} recordings, {args.workers} worker(s) …")

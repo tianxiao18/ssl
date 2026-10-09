@@ -72,16 +72,16 @@ from concurrent.futures import ProcessPoolExecutor, as_completed
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
+from vox_tracer.paths import discover_channels, discover_recordings
 from vox_tracer.spec import calibrate_db_range, load_channel_audio, write_chunk_spectrograms
 
-DATASETS = ("gerbil_ssl", "dryad_gerbil", "gerbil_family", "mongolia_wild_data")
-
 parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
-parser.add_argument("--dataset", required=True, choices=DATASETS)
+parser.add_argument("--dataset", required=True, help="any dir name under data/")
 parser.add_argument("--recording", default=None,
                     help="single experiment_X/idx_Y to process (omit and pass --all instead "
                          "to process every recording in the dataset)")
-parser.add_argument("--channels",    default="118,35")
+parser.add_argument("--channels",    default=None,
+                    help="comma-separated channel ids (default: every {prefix}_<ch>_*.wav found)")
 parser.add_argument("--prefix",      default="headmic",
                     help="recording-stream filename prefix, matching '{prefix}_{ch}_*.wav' audio "
                          "(default: headmic, the gerbil_ssl multi-mic rig). A single-stream dataset can "
@@ -101,13 +101,23 @@ parser.add_argument("--source-wav", type=Path, default=None,
                          "generating -- so a dataset that isn't already arranged as {prefix}_{ch}_*.wav "
                          "per recording doesn't need a separate prep step. Requires exactly one "
                          "--channels value. recording_dir is unaffected/untouched when this is omitted.")
-parser.add_argument("--all",         action="store_true", help="process all experiment_*/idx_* under recording_dir")
+parser.add_argument("--all",         action="store_true",
+                    help="process every dir under data/<dataset> (any depth) holding {prefix}_*.wav")
 parser.add_argument("--workers",     type=int, default=4, help="parallel workers when --all is set (default: 4)")
 args = parser.parse_args()
 
-channels = [int(c) for c in args.channels.split(",")]
-
 recording_base = Path("data") / args.dataset
+if not recording_base.is_dir() and args.source_wav is None:
+    parser.error(f"{recording_base} does not exist")
+if args.channels:
+    channels = [int(c) for c in args.channels.split(",")]
+elif args.source_wav is not None:
+    parser.error("--source-wav requires --channels")
+else:
+    _scope = ([recording_base / args.recording] if args.recording else
+              [d for _, d in discover_recordings(recording_base, f"{args.prefix}_*.wav")])
+    channels = discover_channels(_scope, args.prefix)
+    print(f"channels (auto): {channels}")
 spec_base      = Path("outputs") / "spectrograms" / args.dataset
 
 if args.source_wav is not None:
@@ -153,14 +163,8 @@ if args.recording:
     _process_one(recording_base / args.recording, spec_base / args.recording, channels,
                  args.chunk_sec, args.prefix, args.calibrate, args.lo, args.hi)
 elif args.all:
-    def _out_dir(idx_dir):
-        return spec_base / idx_dir.parent.name / idx_dir.name
-
-    recordings = [
-        (idx_dir, _out_dir(idx_dir))
-        for exp_dir in sorted(recording_base.glob("experiment_*"))
-        for idx_dir in sorted(exp_dir.glob("idx_*"))
-    ]
+    recordings = [(rec_dir, spec_base / rel)
+                  for rel, rec_dir in discover_recordings(recording_base, f"{args.prefix}_*.wav")]
     print(f"Found {len(recordings)} recordings, running with {args.workers} workers …")
 
     done, failed = 0, 0

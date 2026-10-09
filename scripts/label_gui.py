@@ -18,8 +18,14 @@ Any --pad / --disp-w / band flags given here are the setup page's starting value
 campaign remembers what it was last labeled with in view.json beside its spec.
 """
 import argparse
+import os
 import sys
 from pathlib import Path
+
+# Cap BLAS/OpenMP pools before numpy loads; one per core blows the per-user task limit.
+for _v in ("OPENBLAS_NUM_THREADS", "OMP_NUM_THREADS", "MKL_NUM_THREADS",
+           "NUMEXPR_NUM_THREADS"):
+    os.environ.setdefault(_v, "2")
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 from vox_label.server import Session, serve

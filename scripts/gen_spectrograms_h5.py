@@ -8,12 +8,8 @@ the whole recording and writes it to a single HDF5 file, internally chunked
 (--chunk-sec) so a later 1-sec window read only touches the on-disk block(s) it
 needs -- see vox_tracer.spec.write_recording_spectrogram_h5/read_h5_window.
 
-NOT wired into the rest of the pipeline yet: ridge.py, sam3_runner.py,
-squeakout_runner.py, evaluate.py, and friends still read per-chunk PNGs from
-scripts/gen_spectrograms.py's output and haven't been touched. This script only
-produces the HDF5s; validate a recording's output (--recording, then inspect the
-.h5 and pull a PNG back out with vox_tracer.spec.read_h5_window) before running
---all across a full corpus.
+scripts/run.py (sam3, ridge, squeakout) reads these automatically when
+outputs/spectrograms/<dataset> does not exist.
 
 recording_dir is always data/<dataset>/<relative recording path> and h5_dir is
 always outputs/spectrograms_h5/<dataset>/<relative recording path>.h5.
@@ -37,6 +33,7 @@ from glob import glob
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
+from vox_tracer.paths import discover_channels, discover_recordings
 from vox_tracer.spec import calibrate_db_range, load_channel_audio, write_recording_spectrogram_h5, SPEC_LO, SPEC_HI
 
 parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
@@ -44,7 +41,8 @@ parser.add_argument("--dataset",   required=True)
 parser.add_argument("--recording", default=None,
                      help="single recording, as a path relative to data/<dataset> "
                           "(omit and pass --all instead to process every recording)")
-parser.add_argument("--channels",  default="0")
+parser.add_argument("--channels",  default=None,
+                    help="comma-separated channel ids (default: every {prefix}_<ch>_*.wav found)")
 parser.add_argument("--prefix",    default="mic")
 parser.add_argument("--chunk-sec", type=float, default=1.0,
                      help="HDF5 internal storage chunk size, in seconds of columns "
@@ -59,8 +57,14 @@ parser.add_argument("--all",       action="store_true")
 parser.add_argument("--workers",   type=int, default=4)
 args = parser.parse_args()
 
-channels = [int(c) for c in args.channels.split(",")]
 data_base = Path("data") / args.dataset
+if args.channels:
+    channels = [int(c) for c in args.channels.split(",")]
+else:
+    _scope = ([data_base / args.recording] if args.recording else
+              [d for _, d in discover_recordings(data_base, f"{args.prefix}_*.wav")])
+    channels = discover_channels(_scope, args.prefix)
+    print(f"channels (auto): {channels}")
 h5_base   = Path("outputs/spectrograms_h5") / args.dataset
 
 
