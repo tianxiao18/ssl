@@ -11,82 +11,21 @@ evaluation/comparison at the top level, everything else in a subfolder.
 
 ## Setup
 
-### 1. Clone (with submodule)
-
 ```bash
 git clone --recurse-submodules https://github.com/tianxiao18/ssl.git
 cd ssl
-```
-
-If you already cloned without `--recurse-submodules`:
-```bash
-git submodule update --init
-```
-
-### 2. Create a virtual environment and install dependencies
-
-**Linux / CUDA (recommended for SAM3):**
-```bash
 python3 -m venv venv && source venv/bin/activate
-pip install -r requirements.txt
+pip install -r requirements.txt          # Linux/CUDA
+# pip install -r requirements-cpu.txt   # Mac or Windows (no CUDA)
 pip install -e sam3/ --no-deps
-```
-
-**Mac (Apple Silicon) or Windows CPU:**
-```bash
-python3 -m venv venv && source venv/bin/activate   # Windows: venv\Scripts\activate
-pip install -r requirements-cpu.txt
-pip install -e sam3/ --no-deps
-```
-
-### 3. Download SAM3 weights
-
-First-time users must request access at https://huggingface.co/facebook/sam3, then:
-
-```bash
 hf auth login
 hf download facebook/sam3 --local-dir sam3
+pip install inference==1.2.12 --no-deps  # DAS+YOLO only
 ```
 
-This downloads `sam3/sam3.pt` (~3.2 GB) and associated tokenizer files.
+First-time SAM3 users must request access at https://huggingface.co/facebook/sam3 before `hf download` will work.
 
-### 4. SqueakOut (optional)
-
-Place the SqueakOut repo at `squeakout/` with weights at `squeakout/squeakout_weights.ckpt`.
-
-### 5. DAS + YOLO (optional)
-
-```bash
-pip install inference==1.2.12 --no-deps
-```
-
-Note: `inference` is installed `--no-deps` because it pulls in a large server stack that conflicts with the rest of the environment. Only `get_model()` is used.
-
----
-
-### Worker count guide
-
-| Script / model | Safe `--workers` |
-|---|---|
-| `gen_spectrograms.py` | up to number of CPU cores |
-| `run.py ridge` | up to number of CPU cores |
-| `run.py squeakout` | **1** when using GPU; up to CPU cores on CPU |
-| `run.py sam3` | **1** (model stays loaded across windows) |
-| `run.py das_yolo` | **1** |
-
----
-
-### Platform support
-
-| Feature | Linux + CUDA | Mac (Apple Silicon) | Windows CPU |
-|---|---|---|---|
-| Ridge filter | ✅ | ✅ | ✅ |
-| SAM3 image inference | ✅ | ✅ | ✅ |
-| SqueakOut | ✅ | ✅ (CPU) | ✅ (CPU) |
-| DAS + YOLO | ✅ | ✅ | ✅ |
-| SAM3 video tracking | ✅ | ❌ (triton required) | ❌ (triton required) |
-
-The `sam3/` submodule is a fork of `facebookresearch/sam3` with [PR #627](https://github.com/facebookresearch/sam3/pull/627) applied (device-agnostic inference) plus a `geometry_encoders.py` fix for a `pin_memory` segfault on CPU. On Linux + CUDA, behaviour is identical to upstream.
+For SqueakOut, place the repo at `squeakout/` with weights at `squeakout/squeakout_weights.ckpt`.
 
 ## Main pipeline
 
