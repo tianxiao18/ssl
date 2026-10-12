@@ -102,7 +102,12 @@ def build_processor(checkpoint=None, score_threshold=0.5):
         print("Downloading SAM3 from HuggingFace …")
         sam3_model = build_sam3_image_model(load_from_HF=True, bpe_path=_bpe)
     processor = Sam3Processor(sam3_model, confidence_threshold=score_threshold)
-    print("SAM3 ready.")
+    from sam3.device_utils import DEVICE
+    device_type = DEVICE.type
+    if device_type == "cpu":
+        print("SAM3 ready.  Device: CPU (no GPU available — inference will be slow).")
+    else:
+        print(f"SAM3 ready.  Device: {DEVICE}")
     return processor
 
 
@@ -284,7 +289,9 @@ def run_sam3(
         if audio is None:
             print(f"  sam3 ch{ch}: no audio in {recording_dir} -> spectral gates skipped")
 
-        for win in iter_sam3_windows(processor, entries, cache_sato=False, chunk_sec=chunk_sec, **stage1):
+        from tqdm import tqdm
+        for win in tqdm(iter_sam3_windows(processor, entries, cache_sato=False, chunk_sec=chunk_sec, **stage1),
+                        total=len(entries), desc=f"sam3 ch{ch}", unit="win"):
             iid = len(coco["images"])
             coco["images"].append(
                 image_entry(iid, win["fname"], win["W"], win["H"],
