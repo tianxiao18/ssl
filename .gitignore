@@ -1,20 +1,27 @@
-# data and results
-data
-outputs/
-logs/
-
-# Python
-__pycache__/
-*.py[cod]
-*.so
-
-# virtual environment
+# Virtual environment
 venv/
 
-# Jupyter
-.ipynb_checkpoints/
+# Data and outputs (large, machine-local)
+data/
+outputs/
 
-# editors / OS
+# SAM3 model weights (download via: hf download facebook/sam3 --local-dir sam3)
+sam3/sam3.pt
+sam3/model.safetensors
+sam3/sam3/assets/
+sam3/config.json
+sam3/tokenizer.json
+sam3/tokenizer_config.json
+sam3/special_tokens_map.json
+sam3/vocab.json
+sam3/merges.txt
+sam3/processor_config.json
+
+# SqueakOut weights
+squeakout/
+
+# Python cache
+__pycache__/
+*.pyc
+*.pyo
 .DS_Store
-
-.claude

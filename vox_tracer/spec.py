@@ -59,6 +59,10 @@ def load_channel_audio(recording_dir, ch, prefix="headmic"):
     """
     matches = sorted(glob(str(Path(recording_dir) / f"{prefix}_{ch}_*.wav")))
     if not matches:
+        # fall back: match zero-padded channel numbers (e.g. channel_00_*.wav when ch=0)
+        pat = re.compile(rf"^{re.escape(prefix)}_0*{ch}_.*\.wav$")
+        matches = sorted(str(p) for p in Path(recording_dir).glob(f"{prefix}_*.wav") if pat.match(p.name))
+    if not matches:
         return None
     sr, audio = wavfile.read(matches[0])
     if np.issubdtype(audio.dtype, np.signedinteger):

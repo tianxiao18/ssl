@@ -145,6 +145,17 @@ def iter_sam3_windows(
     sato cache doesn't accumulate across all recordings (see _gray_and_sato).
     """
     sigmas = list(sigmas)
+
+    # Detect device from the processor/model once, before the loop.
+    try:
+        _ac_device = next(getattr(processor, 'model', processor).parameters()).device.type
+    except (StopIteration, AttributeError):
+        _ac_device = 'cpu'
+    if _ac_device not in ('cuda', 'cpu', 'mps'):
+        _ac_device = 'cpu'
+    # bfloat16 autocast is only beneficial on CUDA; fall back to float32 elsewhere.
+    _use_autocast = _ac_device == 'cuda'
+
     for source, t0, t1 in entries:
         got = _gray_and_sato(source, t0, t1, sigmas, cache=cache_sato)
         if got is None:
@@ -161,7 +172,7 @@ def iter_sam3_windows(
             x0, y0, x1, y1 = best_box
             norm_box = [(x0 + x1) / 2 / W, (y0 + y1) / 2 / H, (x1 - x0) / W, (y1 - y0) / H]
             pil_rgb  = Image.fromarray(cv2.cvtColor(gray, cv2.COLOR_GRAY2RGB))
-            with torch.autocast(device_type="cuda", dtype=torch.bfloat16):
+            with torch.autocast(device_type=_ac_device, dtype=torch.bfloat16, enabled=_use_autocast):
                 state = processor.set_image(pil_rgb)
                 state = processor.add_geometric_prompt(box=norm_box, label=True, state=state)
             for mask_tensor, score in zip(state.get("masks", []), state.get("scores", [])):
