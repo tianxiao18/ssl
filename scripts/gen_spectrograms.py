@@ -67,6 +67,7 @@ rig's amplitude scale, and doesn't transfer across datasets. Known-good values:
   treating it as fixed.
 """
 import argparse
+import multiprocessing
 import sys
 from concurrent.futures import ProcessPoolExecutor, as_completed
 from pathlib import Path
@@ -74,6 +75,10 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 from vox_tracer.paths import discover_channels, discover_recordings
 from vox_tracer.spec import calibrate_db_range, load_channel_audio, write_chunk_spectrograms
+
+# Force fork on non-Windows so Mac workers don't re-import this script.
+if sys.platform != "win32":
+    multiprocessing.set_start_method("fork", force=True)
 
 parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
 parser.add_argument("--dataset", required=True, help="any dir name under data/")
@@ -105,6 +110,9 @@ parser.add_argument("--all",         action="store_true",
                     help="process every dir under data/<dataset> (any depth) holding {prefix}_*.wav")
 parser.add_argument("--workers",     type=int, default=4, help="parallel workers when --all is set (default: 4)")
 args = parser.parse_args()
+if sys.platform == "win32" and args.workers > 1:
+    print("WARNING: Windows does not support fork; clamping --workers to 1.")
+    args.workers = 1
 
 recording_base = Path("data") / args.dataset
 if not recording_base.is_dir() and args.source_wav is None:

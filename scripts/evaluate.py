@@ -44,6 +44,7 @@ import argparse
 import csv
 import json
 import math
+import multiprocessing
 import os
 import random
 import sys
@@ -71,6 +72,12 @@ from vox_tracer.scoring import (
     score_combined,
 )
 
+# Mac/Windows spawn multiprocessing re-imports the script in each worker, which
+# recurses into pool creation before argparse has run.  Force fork on non-Windows
+# (Linux HPC already uses fork; Windows can't fork so --workers 1 is required there).
+if sys.platform != "win32":
+    multiprocessing.set_start_method("fork", force=True)
+
 parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
 parser.add_argument("spec_dir")
 parser.add_argument("das_dir",       help="dir with das_yolo coco_ch_<ch>.json (YOLO boxes for visualization)")
@@ -97,6 +104,9 @@ parser.add_argument("--workers",          type=int,   default=4)
 parser.add_argument("--viz-session",      action="store_true",
                     help="write full-session strip (raw | sato+exemplar | pred) for each recording")
 args = parser.parse_args()
+if sys.platform == "win32" and args.workers > 1:
+    print("WARNING: Windows does not support fork; clamping --workers to 1.")
+    args.workers = 1
 
 channels      = [int(c) for c in args.channels.split(",")]
 iou_threshold = args.iou_threshold
