@@ -26,6 +26,7 @@ All recordings in the dataset (parallel):
         --channels 0 --prefix mic --lo -95 --hi -57
 """
 import argparse
+import multiprocessing
 import sys
 import time
 from concurrent.futures import ProcessPoolExecutor, as_completed
@@ -33,6 +34,11 @@ from glob import glob
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
+
+# Force fork on non-Windows so Mac workers don't re-import this script.
+if sys.platform != "win32":
+    multiprocessing.set_start_method("fork", force=True)
+
 from vox_tracer.paths import discover_channels, discover_recordings
 from vox_tracer.spec import calibrate_db_range, load_channel_audio, write_recording_spectrogram_h5, SPEC_LO, SPEC_HI
 
@@ -56,6 +62,9 @@ parser.add_argument("--hi", type=float, default=None)
 parser.add_argument("--all",       action="store_true")
 parser.add_argument("--workers",   type=int, default=4)
 args = parser.parse_args()
+if sys.platform == "win32" and args.workers > 1:
+    print("WARNING: Windows does not support fork; clamping --workers to 1.")
+    args.workers = 1
 
 data_base = Path("data") / args.dataset
 if args.channels:

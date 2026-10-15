@@ -52,9 +52,12 @@ regex==2026.5.9
 typing_extensions==4.15.0
 huggingface_hub==1.20.1
 tqdm==4.67.3
+einops==0.8.2
+psutil==7.2.2
 
 # --- scripts/run.py das_yolo (inference itself installed separately, see above) ---
 supervision==0.28.0
+python-dotenv==1.2.4
 
 # --- scripts/segmentation/finetune_squeakout.py ---
 pycocotools==2.0.11

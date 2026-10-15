@@ -49,21 +49,43 @@ def recording_dir_from_spec_dir(spec_dir, data_root="data"):
     return Path(data_root) / dataset / Path(*rel_parts)
 
 
-def discover_recordings(base, pattern):
-    """Yield (rel_path, abs_dir) for every dir under base (any depth) holding a file matching pattern."""
-    base = Path(base)
-    for rel in sorted({p.parent.relative_to(base) for p in base.glob(f"**/{pattern}")}):
-        yield rel, base / rel
+def discover_recordings(base, glob_pattern):
+    """Yield (rel_path, abs_dir) for every directory under base that contains at
+    least one file matching glob_pattern (searched at any depth).
+
+    rel_path is a Path relative to base; abs_dir is the absolute directory Path.
+    Results are deduplicated (one yield per directory regardless of how many files
+    match) and sorted for a stable, reproducible order.
+    """
+    seen = set()
+    for match in sorted(Path(base).glob(f"**/{glob_pattern}")):
+        parent = match.parent
+        try:
+            rel = parent.relative_to(base)
+        except ValueError:
+            continue
+        if rel not in seen:
+            seen.add(rel)
+            yield rel, parent
 
 
-def discover_channels(recording_dirs, prefix="headmic", ext="wav"):
-    """Sorted channel ids found as {prefix}_{ch}_*.{ext} across recording_dirs."""
+def discover_channels(dirs, prefix, ext="wav"):
+    """Return a sorted list of unique channel integers found in dirs.
+
+    Scans each directory in dirs for files named {prefix}_{ch}_*.{ext} and
+    extracts the channel id (an integer) from the filename. ext should be given
+    without a leading dot (e.g. "wav", "png", "h5").
+    """
     import re
-    pat = re.compile(rf"{re.escape(prefix)}_(\d+)_.*\.{ext}$")
-    chans = set()
-    for d in recording_dirs:
-        for p in Path(d).glob(f"{prefix}_*.{ext}"):
-            m = pat.match(p.name)
+    pattern = re.compile(rf"^{re.escape(prefix)}_(\d+)_.*\.{re.escape(ext)}$")
+    channels: set[int] = set()
+    for d in dirs:
+        try:
+            entries = list(Path(d).iterdir())
+        except (FileNotFoundError, NotADirectoryError):
+            continue
+        for f in entries:
+            m = pattern.match(f.name)
             if m:
-                chans.add(int(m.group(1)))
-    return sorted(chans)
+                channels.add(int(m.group(1)))
+    return sorted(channels)

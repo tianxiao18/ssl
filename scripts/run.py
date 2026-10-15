@@ -36,11 +36,16 @@ python scripts/run.py sam3 outputs/sam3_h5 --dataset dryad_gerbil_full \
     --channels 0 --prefix mic --sam3-checkpoint sam3/sam3.pt
 """
 import argparse
+import multiprocessing
 import sys
 from concurrent.futures import ProcessPoolExecutor, as_completed
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
+
+# Force fork on non-Windows so Mac workers don't re-import this script.
+if sys.platform != "win32":
+    multiprocessing.set_start_method("fork", force=True)
 
 from vox_tracer.paths import discover_channels, discover_recordings
 
@@ -219,6 +224,9 @@ p_yolo.add_argument("--all",       action="store_true",
 p_yolo.add_argument("--workers",   type=int, default=1)
 
 args = parser.parse_args()
+if sys.platform == "win32" and args.workers > 1:
+    print("WARNING: Windows does not support fork; clamping --workers to 1.")
+    args.workers = 1
 if args.model == "das_yolo" and not args.channels:
     parser.error("das_yolo requires --channels")
 
