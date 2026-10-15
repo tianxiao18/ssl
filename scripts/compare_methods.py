@@ -111,11 +111,11 @@ n_methods = len(method_names)
 # grouped bar: Recall / Precision / F1 for each method (micro-averaged over
 # recordings, error bars = per-recording std).
 
-fig, ax_overall = plt.subplots(figsize=(7, 5))
+fig, ax_overall = plt.subplots(figsize=(max(7, 1.2 * n_methods), 5))
 
-colors = plt.cm.tab10(np.linspace(0, 0.3, n_methods))
+colors = plt.cm.tab10(np.arange(n_methods) % 10)  # distinct color per method
 metric_labels = ["Recall", "Precision", "F1"]
-bar_width = 0.22
+bar_width = 0.8 / n_methods
 offsets   = np.linspace(-(n_methods - 1) / 2, (n_methods - 1) / 2, n_methods) * bar_width
 
 # ── Row 0: bar charts ─────────────────────────────────────────────────────────
