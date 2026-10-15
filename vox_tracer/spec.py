@@ -14,6 +14,12 @@ SPEC_LO, SPEC_HI = -70, 0
 NPERSEG, NOVERLAP = 512, 256
 SYNC_PAD = 0.05  # seconds of padding added around each DAS event (split before/after)
 
+
+def n_chunks_for(n_samples, chunk_len):
+    """Chunks tiling n_samples: full chunks plus a final partial one if it holds >= NPERSEG samples."""
+    n_full, rem = divmod(n_samples, chunk_len)
+    return n_full + (rem >= NPERSEG)
+
 def write_spectrogram_img(audio, sr, path, lo=SPEC_LO, hi=SPEC_HI):
     """Save raw audio as a normalised dB spectrogram PNG; return (h, w)."""
     _, _, Pxx = spectrogram(audio, fs=sr, nperseg=NPERSEG, noverlap=NOVERLAP)
@@ -75,12 +81,13 @@ def write_chunk_spectrograms(audio, sr, spec_dir, base_name, chunk_sec=1.0, lo=S
     window for audio whose amplitude scale doesn't match the default calibration (e.g.
     a different recording rig than the one SPEC_LO/SPEC_HI were tuned for).
 
+    The final partial chunk is zero-padded to chunk_len so every PNG spans chunk_sec.
     Skips chunks whose PNG already exists on disk.
     Returns (paths, shapes) in chunk order.
     """
     spec_dir = Path(spec_dir)
     chunk_len = int(chunk_sec * sr)
-    n_chunks = len(audio) // chunk_len
+    n_chunks = n_chunks_for(len(audio), chunk_len)
     paths, shapes = [], []
     for i in range(n_chunks):
         start_i = i * chunk_len
@@ -90,7 +97,9 @@ def write_chunk_spectrograms(audio, sr, spec_dir, base_name, chunk_sec=1.0, lo=S
         if path.exists():
             shape = cv2.imread(str(path), cv2.IMREAD_GRAYSCALE).shape
         else:
-            shape = write_spectrogram_img(audio[start_i:stop_i], sr, path, lo=lo, hi=hi)
+            seg = audio[start_i:stop_i]
+            seg = np.pad(seg, (0, chunk_len - len(seg))) if len(seg) < chunk_len else seg
+            shape = write_spectrogram_img(seg, sr, path, lo=lo, hi=hi)
         paths.append(path)
         shapes.append(shape)
     return paths, shapes
@@ -145,6 +154,16 @@ def write_recording_spectrogram_h5(audio, sr, h5_path, lo=SPEC_LO, hi=SPEC_HI, c
     return h5_path, img_u8.shape
 
 
+def _h5_slice(spec, t, t0, t1):
+    """Columns of spec in [t0, t1); a window past the recording's end is zero-padded to full width."""
+    c0, c1 = np.searchsorted(t, [t0, t1])
+    out = spec[:, c0:c1]
+    if t1 > t[-1] and len(t) > 1:
+        want = int(round((t1 - t0) / (t[1] - t[0])))
+        out = np.pad(out, ((0, 0), (0, max(0, want - out.shape[1]))))
+    return out
+
+
 def read_h5_window(h5_path, t0, t1):
     """Column-slice a recording's HDF5 spectrogram for real time window [t0, t1).
 
@@ -152,9 +171,7 @@ def read_h5_window(h5_path, t0, t1):
     write_spectrogram_img/make_spectrogram_array.
     """
     with h5py.File(h5_path, "r") as f:
-        t = f["t"][:]
-        c0, c1 = np.searchsorted(t, [t0, t1])
-        return f["spec"][:, c0:c1]
+        return _h5_slice(f["spec"], f["t"][:], t0, t1)
 
 
 def group_specs_by_channel(spec_dir, channels=None, prefix="headmic"):
@@ -168,10 +185,11 @@ def group_specs_by_channel(spec_dir, channels=None, prefix="headmic"):
 
 
 def h5_windows(h5_path, chunk_sec=1.0):
-    """[(h5_path, t0, t1), ...] tiling an HDF5 recording's full duration at chunk_sec."""
+    """[(h5_path, t0, t1), ...] tiling an HDF5 recording's full duration at chunk_sec (last window zero-padded)."""
     with h5py.File(h5_path, "r") as f:
-        duration = float(f["t"][-1])
-    n_chunks = int(duration // chunk_sec)
+        t = f["t"][:]
+        sr = f["spec"].attrs["sr"]
+    n_chunks = n_chunks_for(int(round((t[-1] + NPERSEG / 2 / sr) * sr)), int(round(chunk_sec * sr)))
     return [(h5_path, round(i * chunk_sec, 2), round((i + 1) * chunk_sec, 2)) for i in range(n_chunks)]
 
 
@@ -209,8 +227,7 @@ class WindowReader:
             self._f = h5py.File(source, "r")
             self._t = self._f["t"][:]
             self._path = source
-        c0, c1 = np.searchsorted(self._t, [t0, t1])
-        return self._f["spec"][:, c0:c1]
+        return _h5_slice(self._f["spec"], self._t, t0, t1)
 
     def close(self):
         if self._f is not None:

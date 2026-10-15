@@ -101,7 +101,8 @@ def build_processor(checkpoint=None, score_threshold=0.5):
     else:
         print("Downloading SAM3 from HuggingFace …")
         sam3_model = build_sam3_image_model(load_from_HF=True, bpe_path=_bpe)
-    processor = Sam3Processor(sam3_model, confidence_threshold=score_threshold)
+    device = "cuda" if torch.cuda.is_available() else "cpu"
+    processor = Sam3Processor(sam3_model, device=device, confidence_threshold=score_threshold)
     print("SAM3 ready.")
     return processor
 
@@ -161,7 +162,8 @@ def iter_sam3_windows(
             x0, y0, x1, y1 = best_box
             norm_box = [(x0 + x1) / 2 / W, (y0 + y1) / 2 / H, (x1 - x0) / W, (y1 - y0) / H]
             pil_rgb  = Image.fromarray(cv2.cvtColor(gray, cv2.COLOR_GRAY2RGB))
-            with torch.autocast(device_type="cuda", dtype=torch.bfloat16):
+            with torch.autocast(device_type="cuda", dtype=torch.bfloat16,
+                                enabled=processor.device == "cuda"):
                 state = processor.set_image(pil_rgb)
                 state = processor.add_geometric_prompt(box=norm_box, label=True, state=state)
             for mask_tensor, score in zip(state.get("masks", []), state.get("scores", [])):
@@ -273,8 +275,12 @@ def run_sam3(
         if audio is None:
             print(f"  sam3 ch{ch}: no audio in {recording_dir} -> spectral gates skipped")
 
-        for win in iter_sam3_windows(processor, entries, cache_sato=False, chunk_sec=chunk_sec, **stage1):
+        # stage-1 maps freq_min to a pixel row, so use the audio's real sample rate when known
+        ch_stage1 = {**stage1, "sample_rate": sr} if sr is not None else stage1
+        for win in iter_sam3_windows(processor, entries, cache_sato=False, chunk_sec=chunk_sec, **ch_stage1):
             iid = len(coco["images"])
+            if iid and iid % 20 == 0:
+                print(f"  ch {ch}: {iid}/{len(entries)} windows", flush=True)
             coco["images"].append(
                 image_entry(iid, win["fname"], win["W"], win["H"],
                             window_start_sec=win["window_start"], window_end_sec=win["window_end"])

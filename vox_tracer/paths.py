@@ -47,3 +47,23 @@ def recording_dir_from_spec_dir(spec_dir, data_root="data"):
     """
     dataset, rel_parts = _dataset_and_rel_parts(spec_dir)
     return Path(data_root) / dataset / Path(*rel_parts)
+
+
+def discover_recordings(base, pattern):
+    """Yield (rel_path, abs_dir) for every dir under base (any depth) holding a file matching pattern."""
+    base = Path(base)
+    for rel in sorted({p.parent.relative_to(base) for p in base.glob(f"**/{pattern}")}):
+        yield rel, base / rel
+
+
+def discover_channels(recording_dirs, prefix="headmic", ext="wav"):
+    """Sorted channel ids found as {prefix}_{ch}_*.{ext} across recording_dirs."""
+    import re
+    pat = re.compile(rf"{re.escape(prefix)}_(\d+)_.*\.{ext}$")
+    chans = set()
+    for d in recording_dirs:
+        for p in Path(d).glob(f"{prefix}_*.{ext}"):
+            m = pat.match(p.name)
+            if m:
+                chans.add(int(m.group(1)))
+    return sorted(chans)

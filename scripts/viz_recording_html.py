@@ -69,12 +69,12 @@ UNITS = 1000.0
 def parse_args():
     p = argparse.ArgumentParser(description=__doc__,
                                 formatter_class=argparse.RawDescriptionHelpFormatter)
-    p.add_argument("spec_base",      help="base of per-recording HDF5 spectrograms")
+    p.add_argument("spec_base",      help="base of per-recording HDF5 or per-window PNG spectrograms")
     p.add_argument("pred_base",      help="base of per-recording coco_ch_<ch>.json")
     p.add_argument("recording_base", help="base of per-recording *annotations_gt.csv")
     p.add_argument("out_dir")
     p.add_argument("--channels", default="0")
-    p.add_argument("--prefix",   default="mic", help="HDF5 filename prefix: <prefix>_<ch>_*.h5")
+    p.add_argument("--prefix",   default="mic", help="spectrogram filename prefix: <prefix>_<ch>_*.h5 or .png")
     p.add_argument("--recordings", nargs="*", default=None,
                    help="explicit relative recording paths; default = discover under pred_base")
     p.add_argument("--limit", type=int, default=3,
@@ -105,6 +105,34 @@ def discover(pred_base, channels, limit):
                        for ch in channels
                        for p in Path(pred_base).glob(f"*/coco_ch_{ch}.json")})
     return hits[:limit] if limit else hits
+
+
+def _strips(spec_dir, prefix, ch, h5s, strips):
+    """Yield (windows, gray strip, t_lo, t_hi) from the HDF5 if present, else per-window PNGs."""
+    if not h5s:
+        # One PNG per COCO image, so the strip's time axis is exactly the window edges.
+        for grp in strips:
+            imgs = [cv2.imread(str(spec_dir / im["file_name"]), cv2.IMREAD_GRAYSCALE) for im in grp]
+            if any(x is None for x in imgs):
+                continue
+            yield grp, np.hstack(imgs), grp[0]["window_start_sec"], grp[-1]["window_end_sec"]
+        return
+    # One open handle for the whole recording: read_h5_window() reopens the
+    # file per call, which is ~1200 reopens for a single cohort2 page.
+    with h5py.File(h5s[0], "r") as f:
+        t_axis = f["t"][:]
+        spec = f["spec"]
+        for grp in strips:
+            ws, we = grp[0]["window_start_sec"], grp[-1]["window_end_sec"]
+            c0, c1 = np.searchsorted(t_axis, [ws, we])
+            if c1 - c0 < 2:
+                continue
+            # The strip's pixels span the sampled columns, not the nominal
+            # window edges, so overlays are placed against the axis actually
+            # drawn -- otherwise they drift by up to a bin at the seams.
+            lo, hi = float(t_axis[c0]), float(t_axis[c1 - 1])
+            if hi > lo:
+                yield grp, spec[:, c0:c1], lo, hi
 
 
 def build_recording(rel, args, channels):
@@ -160,8 +188,8 @@ def build_recording(rel, args, channels):
     win_ch = {}
     for ch, d in per_ch.items():
         h5s = sorted(spec_dir.glob(f"{args.prefix}_{ch}_*.h5"))
-        if not h5s:
-            print(f"  {rel} ch{ch}: no {args.prefix}_{ch}_*.h5 in {spec_dir}, skipping channel")
+        if not h5s and not any(spec_dir.glob(f"{args.prefix}_{ch}_*.png")):
+            print(f"  {rel} ch{ch}: no {args.prefix}_{ch}_*.h5/.png in {spec_dir}, skipping channel")
             continue
 
         anns_by_img = {}
@@ -170,78 +198,62 @@ def build_recording(rel, args, channels):
 
         windows = sorted(d["images"], key=lambda im: im["window_start_sec"])
         # Windows tile the recording without gaps, so --cols of them in a row are
-        # cut from the spectrogram as one strip instead of --cols separate images:
-        # a call straddling a window boundary stays whole. Masks keep their own
-        # window's time span and are mapped into the strip's x axis below.
+        # drawn as one strip: a call straddling a window boundary stays whole.
+        # Masks keep their own window's time span and are mapped into the strip's x axis below.
         strips = [windows[i:i + args.cols] for i in range(0, len(windows), args.cols)]
         cells = []
         n_win = 0
-        # One open handle for the whole recording: read_h5_window() reopens the
-        # file per call, which is ~1200 reopens for a single cohort2 page.
-        with h5py.File(h5s[0], "r") as f:
-            t_axis = f["t"][:]
-            spec = f["spec"]
-            for grp in strips:
-                ws, we = grp[0]["window_start_sec"], grp[-1]["window_end_sec"]
-                c0, c1 = np.searchsorted(t_axis, [ws, we])
-                if c1 - c0 < 2:
-                    continue
-                gray = spec[:, c0:c1]
-                # The strip's pixels span the sampled columns, not the nominal
-                # window edges, so overlays are placed against the axis actually
-                # drawn -- otherwise they drift by up to a bin at the seams.
-                lo, hi = float(t_axis[c0]), float(t_axis[c1 - 1])
-                if hi <= lo:
-                    continue
-                sw = args.disp_w * len(grp)
-                dh = int(round(gray.shape[0] * sw / gray.shape[1]))
-                disp = cv2.resize(gray, (sw, dh), interpolation=cv2.INTER_AREA)
-                ok, buf = cv2.imencode(".jpg", disp, [cv2.IMWRITE_JPEG_QUALITY, args.jpeg_q])
-                if not ok:
-                    continue
-                n_win += len(grp)
+        for grp, gray, lo, hi in _strips(spec_dir, args.prefix, ch, h5s, strips):
+            ws, we = grp[0]["window_start_sec"], grp[-1]["window_end_sec"]
+            sw = args.disp_w * len(grp)
+            dh = int(round(gray.shape[0] * sw / gray.shape[1]))
+            disp = cv2.resize(gray, (sw, dh), interpolation=cv2.INTER_AREA)
+            ok, buf = cv2.imencode(".jpg", disp, [cv2.IMWRITE_JPEG_QUALITY, args.jpeg_q])
+            if not ok:
+                continue
+            n_win += len(grp)
 
-                # Overlay coords are strip-relative: x in UNITS, y in COCO rows.
-                H = grp[0]["height"]
+            # Overlay coords are strip-relative: x in UNITS, y in COCO rows.
+            H = grp[0]["height"]
 
-                def x_of(t, lo=lo, hi=hi):
-                    return (t - lo) / (hi - lo) * UNITS
+            def x_of(t, lo=lo, hi=hi):
+                return (t - lo) / (hi - lo) * UNITS
 
-                gt_bands = []
-                for g0, g1 in vox_gt:
-                    if g1 > lo and g0 < hi:
-                        x0 = max(0.0, x_of(max(g0, lo)))
-                        x1 = min(UNITS, x_of(min(g1, hi)))
-                        if x1 > x0:
-                            gt_bands.append([round(x0, 1), round(x1, 1)])
+            gt_bands = []
+            for g0, g1 in vox_gt:
+                if g1 > lo and g0 < hi:
+                    x0 = max(0.0, x_of(max(g0, lo)))
+                    x1 = min(UNITS, x_of(min(g1, hi)))
+                    if x1 > x0:
+                        gt_bands.append([round(x0, 1), round(x1, 1)])
 
-                polys, boxes = [], []
-                for im in grp:
-                    iw = im["width"]
-                    idur = im["window_end_sec"] - im["window_start_sec"]
-                    ysc = H / im["height"]
+            polys, boxes = [], []
+            for im in grp:
+                iw = im["width"]
+                idur = im["window_end_sec"] - im["window_start_sec"]
+                ysc = H / im["height"]
 
-                    def t_of(px, s=im["window_start_sec"], iw=iw, idur=idur):
-                        return s + px / iw * idur
+                def t_of(px, s=im["window_start_sec"], iw=iw, idur=idur):
+                    return s + px / iw * idur
 
-                    for a in anns_by_img.get(im["id"], []):
-                        v = 1 if is_tp(a["t0"], a["t1"]) else 0
-                        if a["seg"]:
-                            for s in a["seg"]:
-                                pts = []
-                                for i in range(0, len(s) - 1, 2):
-                                    pts.append(round(x_of(t_of(s[i])), 1))
-                                    pts.append(round(s[i + 1] * ysc, 1))
-                                polys.append([v, pts])
-                        else:
-                            x, y, w, h = a["bbox"]
-                            x0, x1 = x_of(t_of(x)), x_of(t_of(x + w))
-                            boxes.append([v, round(x0, 1), round(y * ysc, 1),
-                                          round(x1 - x0, 1), round(h * ysc, 1)])
+                for a in anns_by_img.get(im["id"], []):
+                    v = 1 if is_tp(a["t0"], a["t1"]) else 0
+                    if a["seg"]:
+                        for s in a["seg"]:
+                            pts = []
+                            for i in range(0, len(s) - 1, 2):
+                                pts.append(round(x_of(t_of(s[i])), 1))
+                                pts.append(round(s[i + 1] * ysc, 1))
+                            polys.append([v, pts])
+                    else:
+                        x, y, w, h = a["bbox"]
+                        x0, x1 = x_of(t_of(x)), x_of(t_of(x + w))
+                        boxes.append([v, round(x0, 1), round(y * ysc, 1),
+                                      round(x1 - x0, 1), round(h * ysc, 1)])
 
-                cells.append({"b": base64.b64encode(buf).decode(), "w": UNITS, "h": H,
-                              "t0": round(ws, 2), "t1": round(we, 2),
-                              "gt": gt_bands, "p": polys, "bx": boxes})
+            cells.append({"b": base64.b64encode(buf).decode(), "w": UNITS, "h": H,
+                          "t0": round(ws, 2), "t1": round(we, 2),
+                          "gt": gt_bands, "p": polys, "bx": boxes})
         pages_ch[str(ch)] = cells
         win_ch[str(ch)] = n_win
 

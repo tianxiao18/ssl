@@ -12,7 +12,7 @@ from inference import get_model
 from vox_tracer.coco import bbox_annotation, image_entry, make_coco, save_coco_per_channel
 from vox_tracer.spec import (
     NPERSEG, NOVERLAP, SPEC_HI, SPEC_LO, SYNC_PAD,
-    group_specs_by_channel, load_channel_audio, make_spectrogram_array,
+    group_specs_by_channel, load_channel_audio, make_spectrogram_array, n_chunks_for,
 )
 
 YOLO_MODEL_ID      = "gerbil-vox-bbox/6"
@@ -31,9 +31,9 @@ def load_das_events(recording_dir):
     return vox_times[vox_times["name"] == "vox"]
 
 
-def map_das_to_chunks(vox_rows, n_chunks, chunk_sec):
+def map_das_to_chunks(vox_rows, chunk_ids, chunk_sec):
     """Return a dict mapping chunk index → list of DAS event dicts (sync-padded)."""
-    das_by_chunk = {i: [] for i in range(n_chunks)}
+    das_by_chunk = {i: [] for i in chunk_ids}
     for vox_idx, orig_start, orig_stop in zip(
         vox_rows.index, vox_rows.start_seconds, vox_rows.stop_seconds
     ):
@@ -41,7 +41,7 @@ def map_das_to_chunks(vox_rows, n_chunks, chunk_sec):
             continue
         das_start = orig_start - SYNC_PAD / 2
         das_stop  = orig_stop  + SYNC_PAD / 2
-        for i in range(n_chunks):
+        for i in chunk_ids:
             chunk_start = i * chunk_sec
             chunk_stop  = (i + 1) * chunk_sec
             if das_start < chunk_stop and das_stop > chunk_start:
@@ -68,16 +68,14 @@ def _merge_overlapping(events):
     return merged
 
 
-def _run_yolo_on_chunks(audio, sr, chunk_sec, paths, shapes, das_by_chunk, yolo_model):
+def _run_yolo_on_chunks(audio, sr, chunk_sec, chunk_ids, shapes, das_by_chunk, yolo_model):
     """Run YOLO on DAS-cropped sub-windows and remap detections into full-chunk coordinates."""
     chunk_len = int(chunk_sec * sr)
-    n_chunks  = len(paths)
-    yolo_bboxes = {i: [] for i in range(n_chunks)}
+    yolo_bboxes = {i: [] for i in chunk_ids}
 
-    for i in range(n_chunks):
+    for i, (h_chunk, w_chunk) in zip(chunk_ids, shapes):
         if not das_by_chunk[i]:
             continue
-        h_chunk, w_chunk = shapes[i]
         chunk_start_i = i * chunk_len
 
         for event in _merge_overlapping(das_by_chunk[i]):
@@ -116,7 +114,7 @@ def _run_yolo_on_chunks(audio, sr, chunk_sec, paths, shapes, das_by_chunk, yolo_
                 yolo_bboxes[i].append([x1_c, y1_c, x2_c, y2_c, float(conf)])
 
     # Chunk-level NMS: IoU pass then containment filter.
-    for i in range(n_chunks):
+    for i in chunk_ids:
         boxes = yolo_bboxes[i]
         if not boxes:
             continue
@@ -168,24 +166,24 @@ def run_yolo(recording_dir, spec_dir, out_dir, channels=(118, 35), chunk_sec=1.0
             print(f"channel {ch}: no headmic_{ch}_*.wav found, skipping")
             continue
         sr, audio, _ = result
-        chunk_len = int(chunk_sec * sr)
-        n_chunks  = len(audio) // chunk_len
+        n_chunks = n_chunks_for(len(audio), int(chunk_sec * sr))
 
-        ch_specs = group_specs_by_channel(spec_dir, {ch}).get(ch, [])
-        paths    = [p for p, _, _ in ch_specs]
+        ch_specs  = group_specs_by_channel(spec_dir, {ch}).get(ch, [])
+        paths     = [p for p, _, _ in ch_specs]
+        chunk_ids = [int(round(t0 / chunk_sec)) for _, t0, _ in ch_specs]
         if not paths:
             print(f"channel {ch}: no spectrograms in {spec_dir}; run gen_spectrograms.py first")
             continue
-        if len(paths) != n_chunks:
-            print(f"channel {ch}: expected {n_chunks} chunks, found {len(paths)} in {spec_dir}, skipping")
+        if max(chunk_ids) >= n_chunks or len(set(chunk_ids)) != len(chunk_ids):
+            print(f"channel {ch}: chunk times in {spec_dir} don't fit a {n_chunks}-chunk recording, skipping")
             continue
         chunk_shape = cv2.imread(str(paths[0]), cv2.IMREAD_GRAYSCALE).shape
-        shapes      = [chunk_shape] * n_chunks
+        shapes      = [chunk_shape] * len(paths)
 
-        das_by_chunk = map_das_to_chunks(vox_rows, n_chunks, chunk_sec)
-        print(f"channel {ch}: {n_chunks} chunks, {len(audio) / sr:.1f}s recording")
+        das_by_chunk = map_das_to_chunks(vox_rows, chunk_ids, chunk_sec)
+        print(f"channel {ch}: {len(paths)} of {n_chunks} chunks, {len(audio) / sr:.1f}s recording")
 
-        yolo_bboxes = _run_yolo_on_chunks(audio, sr, chunk_sec, paths, shapes,
+        yolo_bboxes = _run_yolo_on_chunks(audio, sr, chunk_sec, chunk_ids, shapes,
                                            das_by_chunk, yolo_model)
 
         coco = make_coco(
@@ -197,17 +195,17 @@ def run_yolo(recording_dir, spec_dir, out_dir, channels=(118, 35), chunk_sec=1.0
                                   "lo": SPEC_LO, "hi": SPEC_HI},
             },
         )
-        for i, (path, shape) in enumerate(zip(paths, shapes)):
+        for k, (i, path, shape) in enumerate(zip(chunk_ids, paths, shapes)):
             h, w = shape
             coco["images"].append(image_entry(
-                i, path.name, w, h,
+                k, path.name, w, h,
                 window_start_sec=i * chunk_sec,
                 window_end_sec=(i + 1) * chunk_sec,
                 das_events=das_by_chunk[i],
             ))
             for x1, y1, x2, y2 in yolo_bboxes[i]:
                 coco["annotations"].append(
-                    bbox_annotation(len(coco["annotations"]), i, x1, y1, x2, y2)
+                    bbox_annotation(len(coco["annotations"]), k, x1, y1, x2, y2)
                 )
         coco_by_ch[ch] = coco
 
