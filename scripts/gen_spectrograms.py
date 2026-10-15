@@ -9,10 +9,10 @@ Single recording:
     python scripts/gen_spectrograms.py --dataset <dataset> --recording <exp>/<idx> [--channels 118,35]
 
 All recordings in the dataset (parallel):
-    python scripts/gen_spectrograms.py --dataset <dataset> --all [--workers 8]
+    python scripts/gen_spectrograms.py --dataset <dataset> [--workers 8]
 
 Example:
-    python scripts/gen_spectrograms.py --dataset gerbil_ssl --all --workers 8
+    python scripts/gen_spectrograms.py --dataset gerbil_ssl --workers 8
 
 Per-dataset dB calibration
 ---------------------------
@@ -83,8 +83,7 @@ if sys.platform != "win32":
 parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
 parser.add_argument("--dataset", required=True, help="any dir name under data/")
 parser.add_argument("--recording", default=None,
-                    help="single experiment_X/idx_Y to process (omit and pass --all instead "
-                         "to process every recording in the dataset)")
+                    help="single recording, relative to data/<dataset> (omit to process every recording)")
 parser.add_argument("--channels",    default=None,
                     help="comma-separated channel ids (default: every {prefix}_<ch>_*.wav found)")
 parser.add_argument("--prefix",      default="headmic",
@@ -107,9 +106,11 @@ parser.add_argument("--source-wav", type=Path, default=None,
                          "per recording doesn't need a separate prep step. Requires exactly one "
                          "--channels value. recording_dir is unaffected/untouched when this is omitted.")
 parser.add_argument("--all",         action="store_true",
-                    help="process every dir under data/<dataset> (any depth) holding {prefix}_*.wav")
+                    help="process every dir under data/<dataset> (any depth) holding {prefix}_*.wav "
+                         "(the default when --recording is not given)")
 parser.add_argument("--workers",     type=int, default=4, help="parallel workers when --all is set (default: 4)")
 args = parser.parse_args()
+args.all = args.all or (not args.recording and args.source_wav is None)
 if sys.platform == "win32" and args.workers > 1:
     print("WARNING: Windows does not support fork; clamping --workers to 1.")
     args.workers = 1

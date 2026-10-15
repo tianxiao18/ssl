@@ -15,8 +15,8 @@ Single recording:
     python scripts/run.py das_yolo  <out_dir> --dataset <dataset> --recording <exp>/<idx> [options]
 
 All recordings in the dataset:
-    python scripts/run.py ridge    <out_dir> --dataset <dataset> --all --workers 8
-    python scripts/run.py das_yolo <out_dir> --dataset <dataset> --all --workers 1
+    python scripts/run.py ridge    [out_dir] --dataset <dataset> --workers 8
+    python scripts/run.py das_yolo [out_dir] --dataset <dataset>
 
 Output: <out_dir>/<dataset>/coco_ch_<ch>.json per channel.
 
@@ -28,7 +28,11 @@ python scripts/run.py sam3 outputs/sam3 --dataset gerbil_ssl \
 
 # all recordings in parallel
 python scripts/run.py sam3 outputs/sam3 --dataset gerbil_ssl \
-    --all --sam3-checkpoint sam3/sam3.pt
+    --sam3-checkpoint sam3/sam3.pt
+
+# fine-tuned SAM3 on every recording (out_dir defaults to outputs/<model>; weights download on first use)
+python scripts/run.py sam3_ft_seg --dataset gerbil_ssl
+python scripts/run.py sam3_ft_box2mask --dataset my_dataset --prefix mic
 
 # HDF5-backed dataset: same command, auto-detected from outputs/spectrograms_h5/<dataset>
 python scripts/run.py sam3 outputs/sam3_h5 --dataset dryad_gerbil_full \
@@ -80,6 +84,9 @@ def _run_one(model, spec_dir, out_dir, kw):
     elif model == "sam3":
         from vox_tracer.sam3_runner import run_sam3
         run_sam3(spec_dir, out_dir, **kw)
+    elif model in ("sam3_ft_seg", "sam3_ft_box2mask"):
+        from vox_tracer.sam3_ft_runner import run_sam3_ft
+        run_sam3_ft(spec_dir, out_dir, **kw)
     elif model == "das_yolo":
         from vox_tracer.das_yolo import run_yolo
         run_yolo(kw.pop("recording_dir"), spec_dir, out_dir, **kw)
@@ -93,12 +100,15 @@ sub = parser.add_subparsers(dest="model", required=True)
 
 
 def _add_spec_args(p):
-    p.add_argument("out_dir", help="stage/variant name, e.g. outputs/ridge_flatness "
-                                    "(dataset is appended automatically)")
+    p.add_argument("out_dir", nargs="?", default=None,
+                   help="stage/variant name, e.g. outputs/ridge_flatness (default: outputs/<model>; "
+                        "dataset is appended automatically)")
     p.add_argument("--dataset", required=True, help="any dataset under outputs/spectrograms[_h5]/")
     p.add_argument("--recording", default=None,
-                   help="single experiment_X/idx_Y to process (omit and pass --all instead "
-                        "to process every recording in the dataset)")
+                   help="single recording, relative to the dataset (omit to process every recording)")
+    p.add_argument("--recordings-file", default=None,
+                   help="text file, one recording (relative to the dataset) per line: process only these "
+                        "(e.g. one shard per Slurm array task)")
     p.add_argument("--channels", default=None,
                    help="comma-separated channel ids (default: every channel found in the spectrograms)")
     p.add_argument("--prefix",  default="headmic",
@@ -106,7 +116,7 @@ def _add_spec_args(p):
                         "spectrograms and '{prefix}_{ch}_*.wav' audio (default: headmic, the gerbil_ssl "
                         "multi-mic rig). A single-stream dataset can pass its own label with --channels 0.")
     p.add_argument("--all",     action="store_true",
-                   help="process all experiment_*/idx_* in the dataset; mirror structure into out_dir")
+                   help="process every recording in the dataset (the default when --recording is not given)")
     p.add_argument("--workers", type=int, default=1,
                    help="parallel workers for --all (keep 1 for GPU models, default: 1)")
 
@@ -209,21 +219,35 @@ p_sam3.add_argument("--chunk-sec", type=float, default=1.0,
                          "the --chunk-sec used at generation time for aligned reads. Ignored for "
                          "PNG-backed datasets.")
 
+# --- sam3_ft_seg / sam3_ft_box2mask ---
+for _name, _help in (("sam3_ft_seg", "fine-tuned SAM3, masks from its fine-tuned mask head"),
+                     ("sam3_ft_box2mask", "fine-tuned SAM3 detector, masks from original SAM3 box prompts")):
+    _p = sub.add_parser(_name, help=_help)
+    _add_spec_args(_p)
+    _p.add_argument("--checkpoint", default=None,
+                    help="fine-tuned weights (default: checkpoints/<sam3_ft_seg|sam3_ft_box2mask>.pt, "
+                         "downloaded from the GitHub release if missing)")
+    _p.add_argument("--threshold", type=float, default=0.5, help="detection score threshold")
+    _p.add_argument("--chunk-sec", type=float, default=1.0,
+                    help="HDF5-backed datasets only: window size in seconds (see sam3 --chunk-sec)")
+    _p.add_argument("--overwrite", action="store_true", help="reprocess channels that already have output")
+
 # --- das_yolo ---
 p_yolo = sub.add_parser("das_yolo", help="DAS-guided YOLO detection")
-p_yolo.add_argument("out_dir", help="stage/variant name, e.g. outputs/das_yolo "
-                                     "(dataset is appended automatically)")
+p_yolo.add_argument("out_dir", nargs="?", default=None,
+                    help="stage/variant name (default: outputs/das_yolo; dataset is appended automatically)")
 p_yolo.add_argument("--dataset", required=True)
 p_yolo.add_argument("--recording", default=None,
-                    help="single experiment_X/idx_Y to process (omit and pass --all instead "
-                         "to process every recording in the dataset)")
+                    help="single recording, relative to the dataset (omit to process every recording)")
 p_yolo.add_argument("--channels",  default="118,35")
 p_yolo.add_argument("--chunk-sec", type=float, default=1.0)
 p_yolo.add_argument("--all",       action="store_true",
-                    help="process all experiment_*/idx_* in the dataset")
+                    help="process every recording in the dataset (the default when --recording is not given)")
 p_yolo.add_argument("--workers",   type=int, default=1)
 
 args = parser.parse_args()
+args.out_dir = args.out_dir or f"outputs/{args.model}"
+args.all = args.all or not args.recording
 if sys.platform == "win32" and args.workers > 1:
     print("WARNING: Windows does not support fork; clamping --workers to 1.")
     args.workers = 1
@@ -270,6 +294,12 @@ elif args.model == "sam3":
               overwrite=args.overwrite,
               prefix=args.prefix,
               chunk_sec=args.chunk_sec)
+elif args.model in ("sam3_ft_seg", "sam3_ft_box2mask"):
+    kw = dict(variant=args.model.removeprefix("sam3_ft_"), checkpoint=args.checkpoint,
+              threshold=args.threshold, prefix=args.prefix, chunk_sec=args.chunk_sec, overwrite=args.overwrite)
+    if not args.checkpoint:  # download once here, not in every worker
+        from vox_tracer.sam3_ft_runner import VARIANTS, fetch_checkpoint
+        kw["checkpoint"] = str(fetch_checkpoint(VARIANTS[kw["variant"]][1]))
 elif args.model == "das_yolo":
     kw = dict(chunk_sec=args.chunk_sec)
 
@@ -278,7 +308,7 @@ elif args.model == "das_yolo":
 # outputs/spectrograms_h5/<dataset> (scripts/gen_spectrograms_h5.py, e.g. dryad_gerbil_full).
 _png_base = Path("outputs") / "spectrograms" / args.dataset
 _h5_base  = Path("outputs") / "spectrograms_h5" / args.dataset
-uses_h5 = (args.model in ("sam3", "ridge", "squeakout")
+uses_h5 = (args.model in ("sam3", "ridge", "squeakout", "sam3_ft_seg", "sam3_ft_box2mask")
            and not _png_base.exists() and _h5_base.exists())
 spec_base = _h5_base if uses_h5 else _png_base
 if not spec_base.is_dir():
@@ -330,6 +360,9 @@ elif args.all:
             for rel, idx_dir in _discover(spec_base, args.prefix)
         ]
 
+    if getattr(args, "recordings_file", None):
+        keep = {x.strip() for x in open(args.recordings_file) if x.strip()}
+        tasks = [t for t in tasks if Path(t[0]).relative_to(spec_base).as_posix() in keep]
     print(f"Found {len(tasks)} recordings, {args.workers} worker(s) …")
     done, failed = 0, 0
 
@@ -356,5 +389,3 @@ elif args.all:
                     failed += 1
 
     print(f"\nDone: {done} succeeded, {failed} failed.")
-else:
-    parser.error("either --recording <exp>/<idx> or --all is required")

@@ -16,7 +16,7 @@ Single recording:
     python scripts/evaluate.py <spec_dir> <das_dir> <recording_dir> <pred_dir> <out_dir> [options]
 
 All recordings (any layout depth -- experiment_*/idx_*, flat, or nested cohorts):
-    python scripts/evaluate.py <spec_base> <das_base> <recording_base> <pred_base> <out_base> --all [--workers 4]
+    python scripts/evaluate.py <spec_base> <das_base> <recording_base> <pred_base> <out_base> [--workers 4]
 
 Examples
 --------
@@ -37,7 +37,7 @@ python scripts/evaluate.py \
     data \
     outputs/squeakout \
     outputs/eval/squeakout \
-    --all --workers 4 \
+    --workers 4 \
     --gt-csv data/sampled_contiguous_detections.csv
 """
 import argparse
@@ -99,11 +99,13 @@ parser.add_argument("--montage-samples",  type=int,   default=0,
                     help="if >0, sample this many TP/FP/FN chunks and write montages")
 parser.add_argument("--seed",             type=int,   default=0)
 parser.add_argument("--all",              action="store_true",
-                    help="evaluate all experiment_*/idx_* dirs; mirror structure into out_dir")
+                    help="evaluate every recording under the base dirs; mirror structure into out_dir "
+                         "(auto when pred_dir has no coco_ch_*.json of its own)")
 parser.add_argument("--workers",          type=int,   default=4)
 parser.add_argument("--viz-session",      action="store_true",
                     help="write full-session strip (raw | sato+exemplar | pred) for each recording")
 args = parser.parse_args()
+args.all = args.all or not any(Path(args.pred_dir).glob("coco_ch_*.json"))
 if sys.platform == "win32" and args.workers > 1:
     print("WARNING: Windows does not support fork; clamping --workers to 1.")
     args.workers = 1

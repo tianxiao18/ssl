@@ -25,3 +25,6 @@ __pycache__/
 *.pyc
 *.pyo
 .DS_Store
+
+# Fine-tuned SAM3 weights (GitHub release sam3-ft-v1; see scripts/segmentation/export_sam3_ft.py)
+checkpoints/

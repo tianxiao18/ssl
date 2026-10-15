@@ -22,7 +22,7 @@ Single recording:
         --channels 0 --prefix mic --lo -95 --hi -57
 
 All recordings in the dataset (parallel):
-    python scripts/gen_spectrograms_h5.py --dataset dryad_gerbil_full --all --workers 8 \
+    python scripts/gen_spectrograms_h5.py --dataset dryad_gerbil_full --workers 8 \
         --channels 0 --prefix mic --lo -95 --hi -57
 """
 import argparse
@@ -45,8 +45,7 @@ from vox_tracer.spec import calibrate_db_range, load_channel_audio, write_record
 parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
 parser.add_argument("--dataset",   required=True)
 parser.add_argument("--recording", default=None,
-                     help="single recording, as a path relative to data/<dataset> "
-                          "(omit and pass --all instead to process every recording)")
+                     help="single recording, as a path relative to data/<dataset> (omit to process every recording)")
 parser.add_argument("--channels",  default=None,
                     help="comma-separated channel ids (default: every {prefix}_<ch>_*.wav found)")
 parser.add_argument("--prefix",    default="mic")
@@ -59,9 +58,10 @@ parser.add_argument("--calibrate", action="store_true",
                           "docstring for why this is usually the wrong call for a new dataset)")
 parser.add_argument("--lo", type=float, default=None)
 parser.add_argument("--hi", type=float, default=None)
-parser.add_argument("--all",       action="store_true")
+parser.add_argument("--all",       action="store_true", help="every recording (the default without --recording)")
 parser.add_argument("--workers",   type=int, default=4)
 args = parser.parse_args()
+args.all = args.all or args.recording is None
 if sys.platform == "win32" and args.workers > 1:
     print("WARNING: Windows does not support fork; clamping --workers to 1.")
     args.workers = 1
