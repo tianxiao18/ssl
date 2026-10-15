@@ -1,4 +1,4 @@
-"""SAM3 fine-tuning helpers (referenced from sam3/sam3/train/configs/gerbil/*.yaml)."""
+"""SAM3 fine-tuning helpers (referenced from configs/sam3_ft/*.yaml)."""
 import torch
 from torch import nn
 

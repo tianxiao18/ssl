@@ -11,11 +11,11 @@
 #SBATCH --output=/tmp/%x-%j.out
 
 # Fine-tune SAM3 with the text prompt "trace" on the corrected-GT pseudo boxes, vision trunk and
-# text encoder frozen, using SAM3's own trainer (sam3/sam3/train/train.py, --use-cluster 0: runs
-# inside this allocation, never submits jobs itself). Two variants, then val-set inference:
-#   box  configs/gerbil/gerbil_trace_ft.yaml      box loss only; masks = its boxes prompted into
+# text encoder frozen, using SAM3's own trainer via scripts/segmentation/train_sam3_ft.py (configs in configs/sam3_ft;
+# --use-cluster 0: runs inside this allocation, never submits jobs itself). Two variants, then val-set inference:
+#   box  configs/sam3_ft/gerbil_trace_ft.yaml      box loss only; masks = its boxes prompted into
 #        SAM3's box->mask predictor            -> outputs/sam3_ft_box2mask/gerbil_ssl
-#   seg  configs/gerbil/gerbil_trace_seg_ft.yaml  box + mask loss; masks from its own mask head
+#   seg  configs/sam3_ft/gerbil_trace_seg_ft.yaml  box + mask loss; masks from its own mask head
 #                                              -> outputs/sam3_ft_head/gerbil_ssl
 # Submit from the repo root: sbatch scripts/sbatch/sam3_ft_trace.sbatch
 # Waits for 7234244 (tail windows + pseudo-box rebuild); drop the --dependency line if it's done.
@@ -34,10 +34,10 @@ RUNS=outputs/sam3_ft/runs
 
 python scripts/dataset_prep/build_sam3_ft_dataset.py --out "$DATA" --prompt trace --min-labeled 0.5
 
-python sam3/sam3/train/train.py -c configs/gerbil/gerbil_trace_ft.yaml --use-cluster 0 --num-gpus 1
+python scripts/segmentation/train_sam3_ft.py -c gerbil_trace_ft --use-cluster 0 --num-gpus 1
 python scripts/segmentation/run_sam3_ft.py --ckpt "$RUNS/trace_frozen_v1/checkpoints/best.pt" \
     --mask-mode box --split-json "$DATA/val/_annotations.coco.json" --out outputs/sam3_ft_box2mask
 
-python sam3/sam3/train/train.py -c configs/gerbil/gerbil_trace_seg_ft.yaml --use-cluster 0 --num-gpus 1
+python scripts/segmentation/train_sam3_ft.py -c gerbil_trace_seg_ft --use-cluster 0 --num-gpus 1
 python scripts/segmentation/run_sam3_ft.py --ckpt "$RUNS/trace_seg_frozen_v1/checkpoints/best.pt" \
     --mask-mode head --split-json "$DATA/val/_annotations.coco.json" --out outputs/sam3_ft_head

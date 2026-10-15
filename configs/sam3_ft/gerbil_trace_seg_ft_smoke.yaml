@@ -1,0 +1,17 @@
+# @package _global_
+# Smoke test of gerbil_trace_seg_ft.yaml: small dataset, 2 epochs, SAM3's own val (COCO bbox AP) at the end.
+defaults:
+  - /gerbil_trace_seg_ft
+  - _self_
+
+paths:
+  data_root: ${paths.repo}/outputs/sam3_ft/smoke/data
+  experiment_log_dir: ${paths.repo}/outputs/sam3_ft/smoke/runs/seg
+
+scratch:
+  max_epochs: 2
+
+trainer:
+  val_epoch_freq: 2
+  logging:
+    log_freq: 5

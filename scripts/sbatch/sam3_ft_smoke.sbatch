@@ -29,9 +29,9 @@ nvidia-smi --query-gpu=name,memory.total --format=csv
 
 # a run whose checkpoint already exists is not retrained
 [ -f "$S/runs/box/checkpoints/checkpoint.pt" ] ||
-    python sam3/sam3/train/train.py -c configs/gerbil/gerbil_trace_ft_smoke.yaml --use-cluster 0 --num-gpus 1
+    python scripts/segmentation/train_sam3_ft.py -c gerbil_trace_ft_smoke --use-cluster 0 --num-gpus 1
 [ -f "$S/runs/seg/checkpoints/checkpoint.pt" ] ||
-    python sam3/sam3/train/train.py -c configs/gerbil/gerbil_trace_seg_ft_smoke.yaml --use-cluster 0 --num-gpus 1
+    python scripts/segmentation/train_sam3_ft.py -c gerbil_trace_seg_ft_smoke --use-cluster 0 --num-gpus 1
 
 for split in train val; do
     J="$S/data/$split/_annotations.coco.json"
