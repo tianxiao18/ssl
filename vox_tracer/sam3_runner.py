@@ -102,7 +102,10 @@ def build_processor(checkpoint=None, score_threshold=0.5):
         print("Downloading SAM3 from HuggingFace …")
         sam3_model = build_sam3_image_model(load_from_HF=True, bpe_path=_bpe)
     processor = Sam3Processor(sam3_model, confidence_threshold=score_threshold)
-    from sam3.device_utils import DEVICE
+    try:
+        from sam3.device_utils import DEVICE
+    except ImportError:  # upstream sam3 has no device_utils
+        DEVICE = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     device_type = DEVICE.type
     if device_type == "cpu":
         print("SAM3 ready.  Device: CPU (no GPU available — inference will be slow).")
@@ -290,7 +293,9 @@ def run_sam3(
             print(f"  sam3 ch{ch}: no audio in {recording_dir} -> spectral gates skipped")
 
         from tqdm import tqdm
-        for win in tqdm(iter_sam3_windows(processor, entries, cache_sato=False, chunk_sec=chunk_sec, **stage1),
+        # stage-1 maps freq_min to a pixel row, so use the audio's real sample rate when known
+        ch_stage1 = {**stage1, "sample_rate": sr} if sr is not None else stage1
+        for win in tqdm(iter_sam3_windows(processor, entries, cache_sato=False, chunk_sec=chunk_sec, **ch_stage1),
                         total=len(entries), desc=f"sam3 ch{ch}", unit="win"):
             iid = len(coco["images"])
             coco["images"].append(
