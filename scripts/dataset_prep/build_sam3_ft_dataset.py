@@ -12,8 +12,14 @@ Each box gets a mask (COCO RLE) from the model that produced it: its polygons on
 cut to the box. das_yolo boxes (no polygons) or empty cuts get no mask; SAM3 then skips them in the
 mask loss but still trains box/score on them.
 
+--label-source das_yolo: boxes from das_yolo instead (gold-free), same val recordings. No blackout
+except < MIN_FRAG_SEC fragments; --das-windows labeled keeps the gold run's windows (labeled-span windows
+of each clip's mic), all uses every window of both mics of every non-val recording (val stays labeled).
+
     python scripts/dataset_prep/build_sam3_ft_dataset.py --dry-run
     python scripts/dataset_prep/build_sam3_ft_dataset.py --out outputs/sam3_ft/gerbil_ssl
+    python scripts/dataset_prep/build_sam3_ft_dataset.py --label-source das_yolo --das-windows all \
+        --out outputs/sam3_ft/gerbil_ssl_dasyolo_all
 """
 import argparse
 import json
@@ -81,6 +87,49 @@ def build(d, cov, spec_root, stats):
                 stats["rows: clean but no window (no PNG yet / outside span)"] += 1
 
 
+def build_das(d, cov, val, a, stats):
+    """Same tuples as build(), boxes from das_yolo's coco_ch_<ch>.json (pixel boxes -> sec / Hz)."""
+    todo = {}  # (rel, ch) -> (clip, labeled spans or None = every window)
+    for clip, g in d.groupby("clip"):
+        rel = rel_of(clip)
+        if a.das_windows == "labeled" or rel in val:
+            todo[rel, int(g.channel.iloc[0])] = (clip, cov[cov["clip"] == clip][["start", "stop"]].to_numpy())
+    if a.das_windows == "all":
+        for p in Path(a.das_root).glob("experiment_*/idx_*/coco_ch_*.json"):
+            rel, ch = f"{p.parent.parent.name}/{p.parent.name}", int(re.search(r"coco_ch_(\d+)", p.name)[1])
+            if rel not in val:
+                m = re.search(r"experiment_(\d+)/idx_(\d+)", rel)
+                todo[rel, ch] = (f"sampled_exp{m[1]}_idx{m[2]}_ch{ch}", None)
+    for (rel, ch), (clip, spans) in sorted(todo.items()):
+        path = Path(a.das_root) / rel / f"coco_ch_{ch}.json"
+        if not path.exists():
+            stats["das: no das_yolo output for clip"] += 1
+            continue
+        c = json.load(open(path))
+        anns = {}
+        for an in c["annotations"]:
+            anns.setdefault(an["image_id"], []).append(an["bbox"])
+        for im in c["images"]:
+            t0, t1, w, h = im["window_start_sec"], im["window_end_sec"], im["width"], im["height"]
+            if spans is not None:
+                lab = [(max(s, t0), min(e, t1)) for s, e in spans if s < t1 and e > t0]
+                if not lab or masked_frac(lab, t0, t1) < a.min_labeled:
+                    continue
+            png = Path(a.spec_root) / rel / im["file_name"]
+            if not png.exists():
+                stats["das: window PNG missing"] += 1
+                continue
+            boxes, ignores = [], []
+            for x, y, bw, bh in anns.get(im["id"], []):
+                s, e = t0 + x / w * (t1 - t0), t0 + (x + bw) / w * (t1 - t0)
+                if e - s < MIN_FRAG_SEC:
+                    ignores.append((s, e))
+                    stats["das: < 10 ms box piece -> ignore"] += 1
+                else:
+                    boxes.append((s, e, (1 - (y + bh) / (h - 1)) * NYQ, (1 - y / (h - 1)) * NYQ, "das_yolo"))
+            yield clip, rel, png, t0, t1, boxes, ignores
+
+
 def masked_frac(ignores, t0, t1):
     """Fraction of [t0, t1] covered by the union of the ignore intervals."""
     tot, end = 0.0, t0
@@ -130,6 +179,16 @@ def box_mask(polys, bb, h, w):
     return {"size": rle["size"], "counts": rle["counts"].decode()}
 
 
+def gt_row_stats(d, stats):
+    """Counts of the gold rows by status/source."""
+    stats["rows: total GT intervals"] = len(d)
+    stats["rows: clean with box (positives)"] = int((d.status == "clean").sum())
+    ign = d[d.status != "clean"]
+    stats["rows: ignore, no model box (unmatched)"] = int(((ign.source == "none") & (ign.label == "vox")).sum())
+    stats["rows: ignore, 'combined' label"] = int((ign.label == "combined").sum())
+    stats["rows: ignore, overlaps another GT interval"] = int(((ign.source != "none") & (ign.label == "vox")).sum())
+
+
 def main():
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("--boxes", default="outputs/pseudo_boxes/gerbil_ssl_corrected_gt_models.csv")
@@ -143,24 +202,24 @@ def main():
     ap.add_argument("--max-windows", type=int, nargs=2, metavar=("TRAIN", "VAL"),
                     help="random subset of the final windows per split (smoke tests)")
     ap.add_argument("--seed", type=int, default=0)
+    ap.add_argument("--label-source", choices=["gt", "das_yolo"], default="gt")
+    ap.add_argument("--das-root", default="outputs/das_yolo/gerbil_ssl")
+    ap.add_argument("--das-windows", choices=["labeled", "all"], default="labeled",
+                    help="das_yolo train windows: the gold run's, or every window of non-val recordings")
     ap.add_argument("--dry-run", action="store_true", help="print statistics only")
     a = ap.parse_args()
 
     d, cov = pd.read_csv(a.boxes), pd.read_csv(a.coverage)
     stats = Counter()
-    stats["rows: total GT intervals"] = len(d)
-    stats["rows: clean with box (positives)"] = int((d.status == "clean").sum())
-    ign = d[d.status != "clean"]
-    stats["rows: ignore, no model box (unmatched)"] = int(((ign.source == "none") & (ign.label == "vox")).sum())
-    stats["rows: ignore, 'combined' label"] = int((ign.label == "combined").sum())
-    stats["rows: ignore, overlaps another GT interval"] = int(((ign.source != "none") & (ign.label == "vox")).sum())
+    if a.label_source == "gt":
+        gt_row_stats(d, stats)
 
     recs = sorted({rel_of(c) for c in d["clip"]})
     rng = np.random.default_rng(a.seed)
     val = set(rng.choice(recs, max(1, round(a.val_frac * len(recs))), replace=False))
     coco = {k: {"images": [], "annotations": [], "categories": [{"id": 1, "name": a.prompt}]} for k in ("train", "val")}
     w_stats = Counter()
-    items = list(build(d, cov, a.spec_root, stats))
+    items = list(build(d, cov, a.spec_root, stats) if a.label_source == "gt" else build_das(d, cov, val, a, stats))
     keep = [1 - masked_frac(it[6], it[3], it[4]) >= a.min_labeled for it in items]
     for it, k in zip(items, keep):
         if not k:
@@ -216,7 +275,8 @@ def main():
     if not a.dry_run:
         for k, c in coco.items():
             json.dump(c, open(Path(a.out) / k / "_annotations.coco.json", "w"))
-    print(f"recordings: {len(recs) - len(val)} train, {len(val)} val")
+    rs = {it[1] for it in items}
+    print(f"recordings: {len(rs - val)} train, {len(rs & val)} val")
     for k in sorted(stats):
         print(f"{k:58s} {stats[k]}")
     for k in sorted(w_stats):
