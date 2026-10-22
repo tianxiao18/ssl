@@ -1,6 +1,6 @@
 <!doctype html>
 <meta charset="utf-8">
-<title>vox label: setup</title>
+<title>vox label</title>
 <style>
   :root{
     --bg:#12131a; --panel:#1b1d27; --line:#2c2f3d; --ink:#e8e9ef; --dim:#9297ab;
@@ -65,45 +65,21 @@
 
 <header>
   <h1>vox label</h1>
-  <span class="sub">setup</span>
+  <span class="sub">choose a campaign</span>
   <span class="sp"></span>
   <span class="sub" id="current"></span>
 </header>
 
 <main>
   <div class="grid">
-    <label class="f">dataset<select id="dataset"></select></label>
-    <label class="f">annotator<input id="annotator" value="anon"></label>
+    <label class="f">your name<input id="annotator" value="anon"></label>
   </div>
 
-  <div class="grid">
-    <label class="f">omega (0 recall, 1 precision)<input id="omega" type="number" step="0.05" min="0" max="1"></label>
-    <label class="f">delta (resolution)<input id="delta" type="number" step="0.005" min="0" max="0.5"></label>
-  </div>
-  <div class="sub" id="rknote">Frozen with the campaign. A campaign that already has them keeps its own.</div>
-
-  <div class="modes">
-    <button id="m-resume" class="on">resume</button>
-    <button id="m-create">new campaign</button>
-  </div>
-
+  <div class="sub">Campaigns found in <code id="root"></code></div>
   <div class="rows" id="campaigns"></div>
 
-  <div id="pane-create" hidden>
-    <div class="grid">
-      <label class="f">pool<select id="pool"></select></label>
-      <label class="f">detectors<input id="detectors" readonly></label>
-      <label class="f">directory<input id="outdir"></label>
-    </div>
-    <div class="grid" style="margin-top:10px">
-      <label class="f">n_max<input id="n_max" type="number" min="1"></label>
-      <label class="f">checkpoints J<input id="J" type="number" min="1" max="100"></label>
-      <label class="f">alpha<input id="alpha" type="number" step="0.005" min="0.0001" max="0.5"></label>
-      <label class="f">seed<input id="seed" type="number"></label>
-      <label class="f" style="justify-content:flex-end"><button id="plan">plan</button></label>
-    </div>
-    <div id="planout"></div>
-  </div>
+  <label class="f">or open a campaign folder by path
+    <input id="path" placeholder="/path/to/label_campaigns/my_campaign"></label>
 
   <div class="foot">
     <button class="go" id="start">start labeling</button>
@@ -114,109 +90,45 @@
 
 <script>
 const $ = id => document.getElementById(id);
-const GRID = ['n_max', 'J', 'alpha', 'seed', 'omega', 'delta'];
-let S = null, mode = 'resume', pick = null;
-
-const num = el => el.value === '' ? null : Number(el.value);
+let S = null, pick = null;
 const fmt = n => n == null ? '?' : n.toLocaleString();
 
 async function boot() {
   S = await (await fetch('/api/setup')).json();
-  $('dataset').innerHTML = S.datasets.map(d =>
-    `<option value="${d.name}">${d.name} (${d.backend}, ${d.n_clips} clips)</option>`).join('');
-  $('dataset').onchange = () => { fillPools(); onPool(); renderCampaigns(); };
-  $('pool').onchange = onPool;
-  for (const k of GRID) if (S.grid_defaults[k] != null) $(k).value = S.grid_defaults[k];
-  // --annotator applies before any campaign is bound, not only after.
+  $('root').textContent = S.campaign_root;
   if (S.current && S.current.annotator) $('annotator').value = S.current.annotator;
   if (S.current && S.current.bound)
     $('current').textContent = `labeling ${S.current.name} (${fmt(S.current.n_labeled)} labeled)`;
-  fillPools(); onPool(); renderCampaigns();
+  render();
 }
 
-// Only pools whose clips this dataset has spectrograms for.
-function fillPools() {
-  const here = $('dataset').value;
-  $('pool').innerHTML = S.pools.map((p, i) => p.datasets.includes(here)
-    ? `<option value="${i}">${p.dir}</option>` : '').join('')
-    || '<option value="">no pool for this dataset</option>';
-}
-
-function onPool() {
-  const p = S.pools[$('pool').value];
-  if (!p) { $('detectors').value = ''; return; }
-  $('detectors').value = p.detectors.join(',');
-  $('outdir').value = suggestOutDir(`${$('dataset').value}_k${p.detectors.length}`);
-}
-
-// A frozen spec is never overwritten, so a name already on disk would be refused at
-// start. Suffix until it is free.
-function suggestOutDir(base) {
-  const taken = new Set(S.campaigns.map(c => c.dir.split('/').pop()));
-  let name = base;
-  for (let i = 2; taken.has(name); i++) name = `${base}_v${i}`;
-  return `outputs/label_campaigns/${name}`;
-}
-
-function renderCampaigns() {
-  const here = $('dataset').value;
+function render() {
   $('campaigns').innerHTML = S.campaigns.map((c, i) => {
     const pct = c.pct == null ? 0 : Math.min(100, c.pct);
-    const other = c.dataset && c.dataset !== here;
     return `<div class="row${pick === i ? ' on' : ''}" data-i="${i}">
       <div>
         <div class="nm">${c.name}</div>
-        <div class="det">${c.detectors.join(', ')} &middot; J=${c.J} &middot; alpha=${c.alpha}${
-          c.ranking ? ` &middot; omega=${c.ranking.omega}, delta=${c.ranking.delta}`
-                    : ' &middot; ranking not frozen yet'}</div>
-        ${other ? `<div class="warn">frozen on ${c.dataset}</div>` : ''}
-        ${c.pool_exists ? '' : '<div class="warn">pool csv missing</div>'}
+        <div class="det">${c.dataset || 'dataset unknown'} &middot; ${c.detectors.join(', ')}</div>
+        ${c.pool_exists ? '' : '<div class="warn">candidates.csv missing</div>'}
       </div>
       <div>
-        <div class="num">${fmt(c.n_labeled)} / ${fmt(c.n_max)}${
-          c.pct == null ? '' : ` (${c.pct}%)`}</div>
+        <div class="num">${fmt(c.n_labeled)} / ${fmt(c.n_max)} labeled</div>
         <div class="bar"><i style="width:${pct}%"></i></div>
       </div>
     </div>`;
-  }).join('') || '<div class="sub">no campaigns yet</div>';
+  }).join('') || `<div class="warn">No campaigns here. The GUI looks in outputs/label_campaigns
+    under the folder it was started from (${S.cwd}). Start it from the folder that holds
+    outputs/, or make a campaign first:<br><code>python scripts/build_candidate_pool.py ...
+    --out outputs/label_campaigns/NAME/candidates.csv</code><br><code>python
+    scripts/make_campaign.py --pool outputs/label_campaigns/NAME/candidates.csv
+    --detectors ... --out outputs/label_campaigns/NAME</code></div>`;
   for (const el of $('campaigns').children) {
     if (el.dataset.i === undefined) continue;
-    el.onclick = () => {
-      pick = Number(el.dataset.i);
-      const c = S.campaigns[pick];
-      if (c.dataset && S.view_defaults[c.dataset]) $('dataset').value = c.dataset;
-      // A frozen choice is shown, not offered: the server would ignore an edit.
-      for (const k of ['omega', 'delta']) {
-        $(k).readOnly = !!c.ranking;
-        $(k).value = c.ranking ? c.ranking[k] : S.grid_defaults[k];
-      }
-      onPool(); renderCampaigns();
-    };
+    el.onclick = () => { pick = Number(el.dataset.i); $('path').value = ''; render(); };
   }
 }
 
-function setMode(m) {
-  mode = m;
-  if (m === 'create') for (const k of ['omega', 'delta']) $(k).readOnly = false;
-  $('m-resume').classList.toggle('on', m === 'resume');
-  $('m-create').classList.toggle('on', m === 'create');
-  $('campaigns').hidden = m !== 'resume';
-  $('pane-create').hidden = m !== 'create';
-}
-$('m-resume').onclick = () => setMode('resume');
-$('m-create').onclick = () => setMode('create');
-
-function gridPayload() {
-  const p = S.pools[$('pool').value];
-  if (!p) throw new Error('no candidate pool on disk. Build one with '
-                          + 'scripts/build_candidate_pool.py');
-  return {
-    pool_csv: p.path, detectors: p.detectors,
-    n_max: num($('n_max')), J: num($('J')),
-    alpha: num($('alpha')), seed: num($('seed')),
-    omega: num($('omega')), delta: num($('delta')),
-  };
-}
+$('path').oninput = () => { if (pick != null) { pick = null; render(); } };
 
 async function post(url, body) {
   const r = await fetch(url, {method: 'POST', headers: {'Content-Type': 'application/json'},
@@ -226,47 +138,17 @@ async function post(url, body) {
   return d;
 }
 
-$('plan').onclick = async () => {
-  $('err').textContent = '';
-  $('plan').disabled = true;
-  try { drawPlan(await post('/api/setup/plan', gridPayload())); }
-  catch (e) { $('err').textContent = e.message; }
-  $('plan').disabled = false;
-};
-
-function drawPlan(d) {
-  $('planout').innerHTML = `
-    <table><thead><tr><th>rule</th><th>f_V</th><th>stream at n_max</th>
-      <th>+/-pts</th><th>checkpoints</th></tr></thead><tbody>
-      ${d.precision.map(r => `<tr><td>${r.rule}</td><td>${r.f_v.toFixed(3)}</td>
-        <td>${fmt(r.stream_at_n_max)}</td><td>${r.half_width_pts.toFixed(2)}</td>
-        <td><code>${r.grid.join(' ')}</code></td></tr>`).join('')}
-      <tr><td>recall</td><td></td><td></td><td></td>
-        <td><code>${d.recall_grid.join(' ')}</code></td></tr>
-    </tbody></table>
-    <table><thead><tr><th>pair</th><th>disagree</th>
-      <th>n to separate a gap of ${d.delta} (80%)</th></tr></thead><tbody>
-      ${d.pairs.map(p => `<tr><td>${p.a} vs ${p.b}</td><td>${(100 * p.p_dis).toFixed(1)}%</td>
-        <td>${fmt(p.n)}</td></tr>`).join('')}
-    </tbody></table>`;
-}
-
 $('start').onclick = async () => {
   $('err').textContent = '';
-  $('status').textContent = 'loading the pool';
+  $('status').textContent = 'loading the campaign';
   $('start').disabled = true;
   try {
-    const base = {dataset: $('dataset').value,
-                  annotator: $('annotator').value.trim() || 'anon'};
-    if (mode === 'create') {
-      await post('/api/setup/start', {...base, ...gridPayload(), mode: 'create',
-                                      out_dir: $('outdir').value.trim()});
-    } else {
-      if (pick == null) throw new Error('pick a campaign to resume');
-      await post('/api/setup/start', {...base, mode: 'resume',
-                                      campaign_dir: S.campaigns[pick].dir,
-                                      omega: num($('omega')), delta: num($('delta'))});
-    }
+    const typed = $('path').value.trim();
+    const c = pick == null ? null : S.campaigns[pick];
+    if (!c && !typed) throw new Error('pick a campaign or type its folder');
+    await post('/api/setup/start', {
+      campaign_dir: c ? c.dir : typed, dataset: c ? c.dataset : null,
+      annotator: $('annotator').value.trim() || 'anon'});
     location.href = '/';
   } catch (e) {
     $('err').textContent = e.message;
@@ -275,6 +157,5 @@ $('start').onclick = async () => {
   }
 };
 
-setMode('resume');
 boot();
 </script>

@@ -534,12 +534,6 @@ def make_handler(session):
             n = int(self.headers.get("Content-Length", 0))
             payload = json.loads(self.rfile.read(n) or b"{}")
             try:
-                if u.path == "/api/setup/plan":
-                    keys = ("rules", "n_max", "J", "alpha", "alpha_per_rule",
-                            "recall_stream_max", "p_real", "omega", "delta")
-                    return self._send(200, setup_mod.plan(
-                        payload["pool_csv"], payload["detectors"],
-                        **{k: payload[k] for k in keys if payload.get(k) is not None}))
                 if u.path == "/api/setup/start":
                     return self._send(200, _start(session, payload))
                 svc = self._svc()
@@ -564,20 +558,9 @@ def make_handler(session):
 
 
 def _start(session, payload):
-    """Handle /api/setup/start: freeze a new campaign if asked, then bind one."""
-    view = payload.get("view") or {}
-    dataset = payload.get("dataset")
-    ranking = {k: payload[k] for k in ("omega", "delta") if payload.get(k) is not None}
-    if payload.get("mode") == "create":
-        path, _ = setup_mod.freeze(
-            payload["out_dir"], payload["pool_csv"], payload["detectors"], dataset,
-            rules=payload.get("rules"),
-            **{k: payload[k] for k in setup_mod.GRID_DEFAULTS if k in payload})
-        campaign_dir = str(Path(path).parent)
-    else:
-        campaign_dir = payload["campaign_dir"]
-    session.bind(campaign_dir, dataset=dataset, view=view,
-                 annotator=payload.get("annotator"), ranking=ranking)
+    """Handle /api/setup/start: bind a frozen campaign (made by make_campaign.py)."""
+    session.bind(payload["campaign_dir"], dataset=payload.get("dataset") or None,
+                 view=payload.get("view") or {}, annotator=payload.get("annotator"))
     return session.status()
 
 

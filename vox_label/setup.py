@@ -84,13 +84,11 @@ def options(view_overrides=None):
     """Everything the setup page needs to render its form."""
     ds = discover.datasets()
     known = [d["name"] for d in ds]
-    pools = discover.pools()
-    for p in pools:
-        p["datasets"] = discover.pool_datasets(p["path"], known)
     return {
+        "cwd": str(Path.cwd()),
+        "campaign_root": str(Path(discover.CAMPAIGN_ROOT).resolve()),
         "datasets": ds,
         "campaigns": discover.campaigns(known_datasets=known),
-        "pools": pools,
         "grid_defaults": dict(GRID_DEFAULTS),
         "view_defaults": {d["name"]: view_for(d, view_overrides) for d in ds},
         "tolerances": TOLERANCES,
@@ -219,6 +217,10 @@ def open_campaign(campaign_dir, dataset=None, view=None, verify=True):
     Labels are replayed from labels.jsonl by the Campaign itself, so a half-finished
     campaign resumes at the next unlabeled candidate with no extra step.
     """
+    if not (Path(campaign_dir) / "campaign.json").exists():
+        raise FileNotFoundError(
+            f"{campaign_dir} has no campaign.json, so it is not a campaign yet. Make "
+            f"it with scripts/make_campaign.py --pool <candidates.csv> --out {campaign_dir}")
     campaign = Campaign(campaign_dir)
     if verify:
         campaign.verify_pool()

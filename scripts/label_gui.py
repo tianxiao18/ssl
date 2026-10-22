@@ -1,8 +1,8 @@
 """Launch the blind labeling GUI.
 
-With no arguments the browser opens a setup page: pick the dataset, resume a campaign
-that is part way through, or freeze a new one over an existing candidate pool with the
-checkpoint grid entered there.
+Campaigns are made beforehand with scripts/make_campaign.py. With no --campaign the
+browser opens a page listing the campaigns under outputs/label_campaigns (relative to
+the folder this is started from); pick one and start.
 
     python scripts/label_gui.py --annotator tianxiao
 
@@ -28,6 +28,7 @@ for _v in ("OPENBLAS_NUM_THREADS", "OMP_NUM_THREADS", "MKL_NUM_THREADS",
     os.environ.setdefault(_v, "2")
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
+from vox_label import discover
 from vox_label.server import Session, serve
 
 
@@ -72,6 +73,10 @@ def main():
              "nyquist_khz", "prefix", "backend")}
     session = Session(annotator=args.annotator,
                       view_overrides={k: v for k, v in view.items() if v is not None})
+    root = Path(discover.CAMPAIGN_ROOT).resolve()
+    if not args.campaign and not root.is_dir():
+        print(f"warning: {root} does not exist, so no campaigns will be listed. Start "
+              f"this from the folder that holds outputs/, or pass --campaign <dir>.")
     if args.campaign:
         ranking = {k: getattr(args, k) for k in ("omega", "delta")
                    if getattr(args, k) is not None}

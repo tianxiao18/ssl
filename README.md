@@ -148,11 +148,24 @@ python scripts/build_candidate_pool.py --dataset gerbil_ssl \
 Detections from all detectors and channels are put on one time axis, and overlapping
 ones are merged into one candidate. Only clips covered by every detector are used.
 
-### 3. Launch the GUI
+### 3. Make the campaign
+
+```bash
+python scripts/make_campaign.py --pool outputs/label_campaigns/<name>/candidates.csv \
+    --detectors sam3_best,ridge,squeakout,das_yolo \
+    --out outputs/label_campaigns/<name> --n-max 6000 --checkpoints 12
+```
+
+This freezes the annotation budget and checkpoints into `campaign.json`, which can never
+be edited afterwards. Add `--plan-only` first to see what a budget buys without writing
+anything. The dataset is detected from the pool; pass `--dataset` if it is ambiguous.
+
+### 4. Launch the GUI
 
 ```bash
 python scripts/label_gui.py --annotator <your_name>
 ```
 
-Open the printed URL, then pick the dataset and create or resume a campaign on the setup
-page. Over SSH, forward the port first: `ssh -L 8765:localhost:8765 <workstation>`.
+Run it from the folder that holds `outputs/`. Open the printed URL, pick the campaign
+and start; labeling resumes where it left off. Over SSH, forward the port first:
+`ssh -L 8765:localhost:8765 <workstation>`.

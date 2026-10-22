@@ -18,6 +18,9 @@ picked with numbers rather than by feel. Then re-run without it to write campaig
         --detectors sam3_best,ridge,squeakout,das_yolo \
         --out outputs/label_campaigns/x --n-max 6000 --checkpoints 12
 
+    # label it
+    python scripts/label_gui.py --annotator <your_name>
+
 Three facts from section 5 that should shape the choice:
 
   Recall binds, not precision.   A precision near 0.9 has variance 0.09; a relative
@@ -33,7 +36,8 @@ import sys
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
-from vox_label.campaign import create
+from vox_label import discover
+from vox_label.setup import freeze
 from vox_label.candidates import load_pool
 from vox_label.exact_grid import c_of_j, even_grid, half_width, plan_n
 from vox_label.rules import accept_fraction, default_rules, resolve
@@ -45,9 +49,11 @@ def main():
     ap.add_argument("--pool", required=True, help="candidates.csv from build_candidate_pool.py")
     ap.add_argument("--detectors", required=True, help="comma-separated, in pool order")
     ap.add_argument("--out", help="campaign directory to create (omit with --plan-only)")
+    ap.add_argument("--dataset", default=None,
+                    help="spectrogram dataset the pool's clips come from; detected from "
+                         "the pool when only one matches")
     ap.add_argument("--rules", default=None,
-                    help="comma-separated rule names; default is each detector plus "
-                         "atleast_k and unanimous")
+                    help="comma-separated rule names; default is each detector alone")
     ap.add_argument("--n-max", type=int, default=6000, help="annotation budget")
     ap.add_argument("--checkpoints", "-J", type=int, default=12,
                     help="number of checkpoints; more looks cost very little "
@@ -62,6 +68,10 @@ def main():
                          "which is generous because P(x=1) is unknown before labeling")
     ap.add_argument("--p-real", type=float, default=None,
                     help="assumed P(x=1) for planning only; never written to the spec")
+    ap.add_argument("--omega", type=float, default=0.5,
+                    help="ranking dial, 0 recall to 1 precision; frozen with the spec")
+    ap.add_argument("--delta", type=float, default=0.01,
+                    help="ranking resolution; frozen with the spec")
     ap.add_argument("--plan-only", action="store_true",
                     help="print what the grid buys and exit without writing anything")
     ap.add_argument("--tolerances", default="0.02,0.03,0.04,0.05",
@@ -69,6 +79,13 @@ def main():
     args = ap.parse_args()
 
     detectors = [d.strip() for d in args.detectors.split(",") if d.strip()]
+    dataset = args.dataset
+    if dataset is None and not args.plan_only:
+        matches = discover.pool_datasets(args.pool, [d["name"] for d in discover.datasets()])
+        if len(matches) != 1:
+            ap.error(f"pass --dataset: the pool's clips match {matches or 'no dataset'} "
+                     f"under {Path(discover.PNG_ROOT).resolve()}")
+        dataset = matches[0]
     rows = load_pool(args.pool, detectors)
     rules = ([r.strip() for r in args.rules.split(",")] if args.rules
              else default_rules(detectors))
@@ -109,11 +126,12 @@ def main():
     if not args.out:
         ap.error("--out is required unless --plan-only is given")
 
-    path, spec = create(args.out, args.pool, detectors, rules=rules, alpha=alpha,
+    path, spec = freeze(args.out, args.pool, detectors, dataset, rules=rules, alpha=alpha,
                         n_max=n_max, J=J, seed=args.seed,
                         recall_stream_max=args.recall_stream_max,
-                        alpha_per_rule=args.alpha_per_rule)
-    print(f"\nfrozen -> {path}")
+                        alpha_per_rule=args.alpha_per_rule,
+                        omega=args.omega, delta=args.delta)
+    print(f"\nfrozen -> {path}  (dataset {dataset})")
     print("This spec is now read-only. To change the grid, the rules, or the pool, "
           "build a new campaign directory.")
 
