@@ -159,6 +159,9 @@ python scripts/make_campaign.py --pool outputs/label_campaigns/<name>/candidates
 This freezes the annotation budget and checkpoints into `campaign.json`, which can never
 be edited afterwards. Add `--plan-only` first to see what a budget buys without writing
 anything. The dataset is detected from the pool; pass `--dataset` if it is ambiguous.
+If spectrograms or audio live elsewhere, pass `--spectrograms <dir>` / `--audio <dir>`
+(folders holding `<dataset>/`); the campaign then records absolute paths and opens
+from any folder.
 
 ### 4. Launch the GUI
 

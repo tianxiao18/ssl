@@ -52,6 +52,11 @@ def main():
     ap.add_argument("--dataset", default=None,
                     help="spectrogram dataset the pool's clips come from; detected from "
                          "the pool when only one matches")
+    ap.add_argument("--spectrograms", default=None,
+                    help="folder holding <dataset>/ spectrograms (PNG or HDF5); default "
+                         "outputs/spectrograms[_h5] under wherever the GUI is started")
+    ap.add_argument("--audio", default=None,
+                    help="folder holding <dataset>/ wav files, for playback; default data/")
     ap.add_argument("--rules", default=None,
                     help="comma-separated rule names; default is each detector alone")
     ap.add_argument("--n-max", type=int, default=6000, help="annotation budget")
@@ -81,10 +86,17 @@ def main():
     detectors = [d.strip() for d in args.detectors.split(",") if d.strip()]
     dataset = args.dataset
     if dataset is None and not args.plan_only:
-        matches = discover.pool_datasets(args.pool, [d["name"] for d in discover.datasets()])
+        if args.spectrograms:
+            root = args.spectrograms
+            names = [p.name for p in Path(root).iterdir() if p.is_dir()]
+            matches = discover.pool_datasets(args.pool, names, root, root)
+        else:
+            root = discover.PNG_ROOT
+            matches = discover.pool_datasets(args.pool,
+                                             [d["name"] for d in discover.datasets()])
         if len(matches) != 1:
             ap.error(f"pass --dataset: the pool's clips match {matches or 'no dataset'} "
-                     f"under {Path(discover.PNG_ROOT).resolve()}")
+                     f"under {Path(root).resolve()}")
         dataset = matches[0]
     rows = load_pool(args.pool, detectors)
     rules = ([r.strip() for r in args.rules.split(",")] if args.rules
@@ -130,7 +142,8 @@ def main():
                         n_max=n_max, J=J, seed=args.seed,
                         recall_stream_max=args.recall_stream_max,
                         alpha_per_rule=args.alpha_per_rule,
-                        omega=args.omega, delta=args.delta)
+                        omega=args.omega, delta=args.delta,
+                        spectrogram_root=args.spectrograms, audio_root=args.audio)
     print(f"\nfrozen -> {path}  (dataset {dataset})")
     print("This spec is now read-only. To change the grid, the rules, or the pool, "
           "build a new campaign directory.")

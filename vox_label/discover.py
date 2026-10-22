@@ -132,6 +132,20 @@ def datasets(png_root=PNG_ROOT, h5_root=H5_ROOT, data_root=DATA_ROOT):
     return out
 
 
+def dataset_info(name, spec_root, data_root=DATA_ROOT):
+    """One dataset's entry, as datasets() lists it, under an explicit spectrogram root."""
+    root = Path(spec_root)
+    backend = "png" if _first_file(root / name, ".png", max_depth=3) else "h5"
+    return {
+        "name": name,
+        "backend": backend,
+        "spec_root": root.as_posix(),
+        "n_clips": len(_subdirs(root / name)),
+        "nyquist_khz": nyquist_khz(name, backend, root, root, data_root),
+        "prefix": png_prefix(name, root) if backend == "png" else None,
+    }
+
+
 def pool_clips(pool_csv, limit=50):
     """A few distinct clip ids from a pool, enough to tell which corpus it came from."""
     clips = []

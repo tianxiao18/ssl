@@ -37,7 +37,8 @@ from vox_label.rules import accept_fraction, default_rules, resolve
 
 def create(out_dir, pool_csv, detectors, rules=None, alpha=0.05, n_max=6000, J=12,
            seed=20260911, recall_stream_max=None, alpha_per_rule=False, dataset=None,
-           omega=0.5, delta=0.01, a_star_guess=0.5):
+           omega=0.5, delta=0.01, a_star_guess=0.5, spectrogram_root=None,
+           audio_root=None):
     """Write campaign.json once. Refuses to overwrite an existing spec."""
     out_dir = Path(out_dir)
     spec_path = out_dir / "campaign.json"
@@ -75,6 +76,10 @@ def create(out_dir, pool_csv, detectors, rules=None, alpha=0.05, n_max=6000, J=1
         # without being told again. Specs frozen before this field fall back to a guess
         # (vox_label/discover.py:guess_dataset).
         "dataset": dataset,
+        # Absolute spectrogram/audio roots when given; None means the outputs/ and data/
+        # folders under wherever the GUI is started.
+        "spectrogram_root": spectrogram_root,
+        "audio_root": audio_root,
         "created": None,  # set by the caller if wanted; kept out of the hash-relevant fields
         "pool_csv": str(Path(pool_csv).as_posix()),
         "pool_sha256": sha256_file(pool_csv),

@@ -169,7 +169,8 @@ def plan(pool_csv, detectors, rules=None, n_max=6000, J=12, alpha=0.05,
     }
 
 
-def freeze(out_dir, pool_csv, detectors, dataset, rules=None, **grid):
+def freeze(out_dir, pool_csv, detectors, dataset, rules=None, spectrogram_root=None,
+           audio_root=None, **grid):
     """Write a new campaign.json. Refuses an existing spec, as `create` always has."""
     params = dict(GRID_DEFAULTS)
     params.update({k: v for k, v in grid.items() if k in GRID_DEFAULTS})
@@ -178,7 +179,16 @@ def freeze(out_dir, pool_csv, detectors, dataset, rules=None, **grid):
                              detectors)
     if not Path(pool_csv).exists():
         raise FileNotFoundError(f"pool {pool_csv} does not exist")
-    matches = discover.pool_datasets(pool_csv, [d["name"] for d in discover.datasets()])
+    # With explicit roots every recorded path is absolute, so the GUI can open the
+    # campaign from any folder.
+    spectrogram_root = spectrogram_root and Path(spectrogram_root).resolve().as_posix()
+    audio_root = audio_root and Path(audio_root).resolve().as_posix()
+    if spectrogram_root:
+        pool_csv = Path(pool_csv).resolve().as_posix()
+        matches = discover.pool_datasets(pool_csv, [dataset], spectrogram_root,
+                                         spectrogram_root)
+    else:
+        matches = discover.pool_datasets(pool_csv, [d["name"] for d in discover.datasets()])
     if dataset not in matches:
         raise ValueError(
             f"pool {pool_csv} holds clips from {matches or 'no known dataset'}, not "
@@ -192,22 +202,24 @@ def freeze(out_dir, pool_csv, detectors, dataset, rules=None, **grid):
         raise ValueError(f"n_max ({params['n_max']}) must be at least J ({params['J']})")
     c_of_j(params["J"])  # raises outside the tabulated range
     path, spec = create(out_dir, pool_csv, detectors, rules=rules, dataset=dataset,
+                        spectrogram_root=spectrogram_root, audio_root=audio_root,
                         **params)
     return path, spec
 
 
-def build_source(dataset, backend="auto", prefix=None):
+def build_source(dataset, backend="auto", prefix=None, spec_root=None, data_root=None):
     """Spectrogram backend for a dataset. `prefix` applies to chunk PNGs only.
 
-    The root follows the resolved backend rather than being passed in: forcing png on
-    a dataset stored as HDF5 would otherwise look for chunks under the h5 root and
-    find none.
+    Without `spec_root` the root follows the resolved backend: forcing png on a dataset
+    stored as HDF5 would otherwise look for chunks under the h5 root and find none.
     """
     resolved = backend
     if backend == "auto":
         resolved = "h5" if Path(discover.H5_ROOT, dataset).exists() else "png"
-    root = discover.H5_ROOT if resolved == "h5" else discover.PNG_ROOT
+    root = spec_root or (discover.H5_ROOT if resolved == "h5" else discover.PNG_ROOT)
     kw = {"prefix": prefix} if resolved == "png" and prefix else {}
+    if data_root:
+        kw["data_root"] = data_root
     return make_source(root, dataset, kind=resolved, **kw)
 
 
@@ -229,7 +241,13 @@ def open_campaign(campaign_dir, dataset=None, view=None, verify=True):
         raise ValueError(
             f"{campaign_dir} does not record which dataset it annotates (it was frozen "
             f"before that field existed). Pick one on the setup page.")
-    info = next((d for d in discover.datasets() if d["name"] == dataset), None)
+    spec_root = campaign.spec.get("spectrogram_root")
+    data_root = campaign.spec.get("audio_root")
+    if spec_root:
+        info = discover.dataset_info(dataset, spec_root, data_root or discover.DATA_ROOT)
+    else:
+        info = next((d for d in discover.datasets() if d["name"] == dataset), None)
     settings = view_for(info, {**campaign.load_view(), **(view or {})})
-    source = build_source(dataset, settings["backend"], settings.get("prefix"))
+    source = build_source(dataset, settings["backend"], settings.get("prefix"),
+                          spec_root, data_root)
     return campaign, source, dataset, settings
