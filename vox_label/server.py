@@ -47,7 +47,7 @@ class LabelService:
     """All campaign state and logic; the HTTP layer below is a thin shell over it."""
 
     def __init__(self, campaign, source, annotator="anon", pad=0.35, disp_w=900,
-                 jpeg_q=72, reveal_every=500, f_lo_khz=5.0, f_hi_khz=60.0,
+                 jpeg_q=72, reveal_every=500, f_lo_khz=0.0, f_hi_khz=60.0,
                  nyquist_khz=62.5):
         self.c = campaign
         self.source = source
@@ -94,6 +94,8 @@ class LabelService:
             "duration_ms": 1000 * (t1 - t0),
             "view_lo": lo,
             "view_hi": hi,
+            "f_lo_khz": self.f_lo_hz / 1000,
+            "f_hi_khz": self.f_hi_hz / 1000,
             "n_labeled": n_done,
             **self.progress(),
         }

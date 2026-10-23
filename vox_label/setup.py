@@ -25,7 +25,7 @@ VIEW_DEFAULTS = {
     "disp_w": 900,
     "jpeg_q": 72,
     "reveal_every": 500,
-    "f_lo_khz": 5.0,
+    "f_lo_khz": 0.0,
     "f_hi_khz": 60.0,
     "nyquist_khz": 62.5,
     "prefix": None,
