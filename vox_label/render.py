@@ -133,8 +133,17 @@ class H5Source:
         return matches[0]
 
     def wav_path(self, clip, ch):
-        """The WAV this channel's HDF5 was made from: same stem."""
-        return self.data / clip / (self._h5_path(clip, ch).stem + ".wav")
+        """The WAV this channel's HDF5 was made from: same stem.
+
+        Falls back to <data>/<clip>.WAV / .wav, so a dataset folder can be the lab's original
+        tree itself (one file per recording, no per-recording folder).
+        """
+        p = self.data / clip / (self._h5_path(clip, ch).stem + ".wav")
+        if not p.exists():
+            for ext in (".WAV", ".wav"):
+                if (self.data / (clip + ext)).exists():
+                    return self.data / (clip + ext)
+        return p
 
     def channels(self, clip):
         import re

@@ -21,7 +21,7 @@ def _subdirs(root):
     return sorted((p for p in root.iterdir() if p.is_dir()), key=lambda p: p.name)
 
 
-def _first_file(root, suffix, max_depth=4):
+def _first_file(root, suffix, max_depth=6):
     """First file with `suffix` under root, breadth-first and depth-capped.
 
     Depth-capped rather than rglob: a dataset directory may be a symlink onto

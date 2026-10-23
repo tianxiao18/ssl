@@ -33,6 +33,8 @@ def main():
     ap.add_argument("--gap", type=float, default=0.0,
                     help="link detections separated by less than this many seconds "
                          "(0 = merge only on genuine overlap)")
+    ap.add_argument("--clips", default=None,
+                    help="text file of clip paths, one per line; pool only these (all must be covered)")
     ap.add_argument("--out", default=None)
     ap.add_argument("--list", action="store_true",
                     help="list the prediction variants available for this dataset and exit")
@@ -63,7 +65,11 @@ def main():
     for d in detectors:
         print(f"  {d:<20}{avail[d]:5d} clips")
     shared = find_clips(args.pred_root, args.dataset, detectors)
-    print(f"  {'intersection':<20}{len(shared):5d} clips used")
+    clips = None
+    if args.clips:
+        clips = [l.strip() for l in open(args.clips) if l.strip()]
+        print(f"  --clips {args.clips}: {len(clips)} clips used")
+    print(f"  {'intersection':<20}{len(shared):5d} clips" + ("" if args.clips else " used"))
     dropped = {d: avail[d] - len(shared) for d in detectors if avail[d] > len(shared)}
     if dropped:
         # A clip one detector never ran on would contribute candidates whose z falsely
@@ -71,7 +77,7 @@ def main():
         print(f"  dropped (not covered by every detector): {dropped}")
 
     n, digest = build_pool(args.pred_root, args.dataset, detectors, args.out,
-                           channels=channels, gap=args.gap, progress=100)
+                           channels=channels, gap=args.gap, progress=100, clips=clips)
     print(f"\n{n} candidates -> {args.out}")
     print(f"sha256 {digest}")
 

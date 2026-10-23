@@ -105,6 +105,18 @@ def clip_candidates(pred_root, dataset, clip_rel, detectors, channels=None, gap=
     return rows
 
 
+def _clip_dirs(root, max_depth=5):
+    """Directories 1..max_depth below `root` that hold coco_ch_*.json (one per clip).
+
+    Depths differ by dataset: gerbil_ssl is cohort/recording, Mongolia mirrors the lab's
+    Colony_Vox tree (colony/date/device[/day]/recording).
+    """
+    out = set()
+    for k in range(1, max_depth + 1):
+        out |= {p.parent for p in Path(root).glob("/".join(["*"] * k) + "/coco_ch_*.json")}
+    return out
+
+
 def available_detectors(pred_root, dataset):
     """Prediction variants that exist for this dataset, with their clip counts.
 
@@ -118,8 +130,7 @@ def available_detectors(pred_root, dataset):
         ds = root / d / dataset
         if not ds.is_dir():
             continue
-        clips = {p.parent for p in ds.glob("*/*/coco_ch_*.json")}
-        clips |= {p.parent for p in ds.glob("*/coco_ch_*.json")}
+        clips = _clip_dirs(ds)
         if clips:
             out[d] = len(clips)
     return out
@@ -135,16 +146,7 @@ def find_clips(pred_root, dataset, detectors):
     per_detector = []
     for det in detectors:
         root = Path(pred_root) / det / dataset
-        clips = {
-            p.parent.relative_to(root).as_posix()
-            for p in root.glob("*/*/coco_ch_*.json")
-        }
-        if not clips:  # flat-layout dataset (one level below <dataset>)
-            clips = {
-                p.parent.relative_to(root).as_posix()
-                for p in root.glob("*/coco_ch_*.json")
-            }
-        per_detector.append(clips)
+        per_detector.append({p.relative_to(root).as_posix() for p in _clip_dirs(root)})
     return sorted(set.intersection(*per_detector))
 
 
@@ -153,12 +155,21 @@ CSV_FIELDS = ["cand_id", "clip", "t_start", "t_end", "duration", "n_detectors",
 
 
 def build_pool(pred_root, dataset, detectors, out_csv, channels=None, gap=0.0,
-               progress=None):
-    """Build the whole pool and write it to `out_csv`. Returns (n_candidates, sha256)."""
+               progress=None, clips=None):
+    """Build the whole pool and write it to `out_csv`. Returns (n_candidates, sha256).
+
+    `clips` restricts the pool to these clips; each must be covered by every detector.
+    """
     fields = CSV_FIELDS[:5] + [f"z_{d}" for d in detectors] + CSV_FIELDS[5:]
     out_csv = Path(out_csv)
     out_csv.parent.mkdir(parents=True, exist_ok=True)
-    clips = find_clips(pred_root, dataset, detectors)
+    covered = find_clips(pred_root, dataset, detectors)
+    if clips is not None:
+        missing = sorted(set(clips) - set(covered))
+        if missing:
+            raise ValueError(f"{len(missing)} requested clips not covered by every detector, e.g. {missing[:3]}")
+        covered = sorted(clips)
+    clips = covered
     cand_id = 0
     with open(out_csv, "w", newline="") as fh:
         writer = csv.DictWriter(fh, fieldnames=fields)
