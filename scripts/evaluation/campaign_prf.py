@@ -21,12 +21,13 @@ from vox_label.server import LabelService
 
 ROOT = Path(__file__).resolve().parents[2]
 CAMPAIGNS = {"gerbil_ssl": "gerbil_ssl_test_k7", "dryad": "dryad_gerbil_full_k7_traces",
-             "mongolia_audiomoth": "mongolia_audiomoth_k6"}
+             "mongolia_audiomoth": "mongolia_audiomoth_k6", "mongolia_k4_hp15k": "mongolia_audiomoth_k4_hp15k"}
 NAME = {"squeakout": "squeakout", "ridge": "ridge", "ridge_raw": "ridge", "das_yolo": "das_yolo", "das": "das",
         "sam3_best": "sam3 zero-shot (box)", "sam3_h5": "sam3 zero-shot (box)",
         "sam3_traces_t037": "sam3 zero-shot (text)", "sam3_traces_dryad_full": "sam3 zero-shot (text)",
         "sam3_ft_traces_gold_v2": "sam3 gold ft", "sam3_ft_traces_gold_v2_dryad": "sam3 gold ft",
         "sam3_ft_traces_dasyolo_labeled_v2": "sam3 das_yolo ft", "sam3_ft_traces_dasyolo_labeled_v2_dryad": "sam3 das_yolo ft"}
+NAME.update({k + "_hp15k": v for k, v in NAME.items()})
 ORDER = ["squeakout", "ridge", "das_yolo", "das", "sam3 zero-shot (box)", "sam3 zero-shot (text)", "sam3 gold ft", "sam3 das_yolo ft"]
 COLORS = ["#2a78d6", "#eb6834", "#1baf7a", "#1baf7a", "#eda100", "#e87ba4", "#6250d6", "#8a8f98"]  # as compare_sam3_ft; das takes the das_yolo slot
 
