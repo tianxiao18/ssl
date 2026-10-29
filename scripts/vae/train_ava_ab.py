@@ -147,7 +147,7 @@ def structure_metrics(z, k_range=range(2, 9)):
         if k >= len(zc):
             continue
         lab = KMeans(n_clusters=k, n_init=10, random_state=0).fit_predict(zc)
-        sil = float(silhouette_score(zc, lab))
+        sil = float(silhouette_score(zc, lab, sample_size=min(10000, len(zc)), random_state=0))  # O(n^2) otherwise
         per_k[k] = sil
         if sil > best["silhouette"]:
             best.update(silhouette=sil, k=int(k),
@@ -168,7 +168,6 @@ def umap_figure(latents, out_png):
         ax.scatter(emb[:, 0], emb[:, 1], s=8, alpha=0.6, c="#4c72b0")
         ax.set_title(f"{arm}  (n={len(emb)})")
         ax.set_xticks([]); ax.set_yticks([])
-    fig.suptitle("AVA VAE latent space — SAM3 mask denoising A/B", fontsize=13)
     fig.tight_layout()
     fig.savefig(out_png, dpi=120)
     print("wrote", out_png)
@@ -205,11 +204,13 @@ def finalize(out):
 
 
 def main():
+    global ARMS
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
-    ap.add_argument("--data", type=Path, required=True, help="dir containing raw/ and masked/ from coco_to_ava_specs.py")
+    ap.add_argument("--data", type=Path, required=True, help="dir containing one subdir of syllables_*.hdf5 per arm")
+    ap.add_argument("--arms", default=",".join(ARMS), help="arm subdirs of --data (default raw,masked; e.g. das,sam3)")
     ap.add_argument("--out", type=Path, default=None, help="output dir (default: {data}/compare)")
-    ap.add_argument("--arm", choices=("raw", "masked", "both", "compare"), default="both",
-                     help="'raw'/'masked' trains one arm only (submit both as separate, "
+    ap.add_argument("--arm", default="both",
+                     help="one arm name trains that arm only (submit each as a separate, "
                           "parallel jobs to halve wall-clock time); 'both' trains "
                           "sequentially in one job (original behavior); 'compare' only "
                           "combines existing latent_{arm}.npy into the UMAP figure + "
@@ -219,7 +220,10 @@ def main():
     ap.add_argument("--batch-size", type=int, default=64)
     ap.add_argument("--seed", type=int, default=0)
     args = ap.parse_args()
-    out = args.out or (args.data / "compare")
+    ARMS = tuple(args.arms.split(","))
+    if args.arm not in ARMS + ("both", "compare"):
+        ap.error(f"--arm must be one of {ARMS + ('both', 'compare')}")
+    out = (args.out or (args.data / "compare")).resolve()  # AVA save_state joins save_dir with relative paths
     out.mkdir(parents=True, exist_ok=True)
 
     if args.arm == "compare":

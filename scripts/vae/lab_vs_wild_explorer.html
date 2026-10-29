@@ -1,0 +1,185 @@
+<title>Lab vs Wild Gerbil Calls</title>
+<meta name="claude:viewport-fit-sides" content="cover">
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Archivo:wght@500;700&family=IBM+Plex+Mono:wght@400;500&family=IBM+Plex+Sans:wght@400;500&display=swap">
+<style>
+/* Layout: one map switch, then two independent maps (lab | wild) with a cluster readout beneath each. */
+:root {
+  --bg: #f6f7f5; --panel: #ffffff; --fg: #1d2421; --muted: #5f6b66; --line: #d9dfdc;
+  --lab: #1f6f8b; --wild: #c2502a; --mat: #0c0a12;
+  --display: "Archivo", "Helvetica Neue", Arial, sans-serif;
+  --body: "IBM Plex Sans", "Helvetica Neue", Arial, sans-serif;
+  --mono: "IBM Plex Mono", ui-monospace, Menlo, monospace;
+}
+@media (prefers-color-scheme: dark) { :root:not([data-theme="light"]) {
+  --bg: #121614; --panel: #1a201d; --fg: #e4e9e6; --muted: #9aa7a1; --line: #2c3531;
+  --lab: #5bb3d1; --wild: #ec7d55; --mat: #000000; color-scheme: dark } }
+:root[data-theme="dark"] {
+  --bg: #121614; --panel: #1a201d; --fg: #e4e9e6; --muted: #9aa7a1; --line: #2c3531;
+  --lab: #5bb3d1; --wild: #ec7d55; --mat: #000000; color-scheme: dark }
+body { background: var(--bg); color: var(--fg); font-family: var(--body); line-height: 1.45;
+  padding-left: max(16px, env(safe-area-inset-left, 0px)); padding-right: max(16px, env(safe-area-inset-right, 0px));
+  padding-block: 20px 28px; }
+.wrap { max-width: 1400px; margin: 0 auto; display: grid; gap: 16px; }
+header { display: grid; gap: 8px; }
+h1 { font-family: var(--display); font-weight: 700; font-size: 1.6rem; margin: 0; text-wrap: balance; letter-spacing: -0.01em; }
+.sub { color: var(--muted); margin: 0; max-width: 84ch; }
+.switch { display: inline-flex; border: 1px solid var(--line); border-radius: 6px; overflow: hidden; width: fit-content; max-width: 100%; flex-wrap: wrap; }
+.switch button { font: inherit; font-size: 0.85rem; border: 0; border-radius: 0; background: var(--panel); color: var(--muted); padding: 6px 12px; cursor: pointer; }
+.switch button + button { border-left: 1px solid var(--line); }
+.switch button[aria-pressed="true"] { background: var(--line); color: var(--fg); font-weight: 500; }
+.grid { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 16px; align-items: start; }
+@media (max-width: 900px) { .grid { grid-template-columns: minmax(0, 1fr); } }
+.card { background: var(--panel); border: 1px solid var(--line); border-radius: 6px; display: grid; min-width: 0; }
+.head { display: flex; flex-wrap: wrap; gap: 8px 14px; align-items: center; padding: 10px 12px; border-bottom: 1px solid var(--line); font-size: 0.85rem; }
+.tag { font-family: var(--mono); font-size: 0.75rem; text-transform: uppercase; letter-spacing: 0.08em; font-weight: 500; }
+.lab .tag { color: var(--lab); } .wild .tag { color: var(--wild); }
+.count { font-family: var(--mono); font-size: 0.78rem; color: var(--muted); font-variant-numeric: tabular-nums; }
+.grow { flex: 1; }
+.head label { display: inline-flex; align-items: center; gap: 6px; cursor: pointer; }
+button { font: inherit; font-size: 0.82rem; color: var(--fg); background: transparent; border: 1px solid var(--line); border-radius: 4px; padding: 4px 10px; cursor: pointer; }
+button:hover { border-color: var(--muted); }
+button:focus-visible, input:focus-visible { outline: 2px solid var(--lab); outline-offset: 2px; }
+canvas { width: 100%; aspect-ratio: 1 / 0.9; max-width: 100%; display: block; cursor: crosshair; touch-action: none; }
+.readout { border-top: 1px solid var(--line); padding: 10px 12px 12px; display: grid; gap: 6px; }
+.readout h2 { font-family: var(--display); font-weight: 500; font-size: 1.05rem; margin: 0; display: flex; align-items: baseline; gap: 10px; flex-wrap: wrap; }
+.stats { font-family: var(--mono); font-size: 0.78rem; color: var(--muted); font-variant-numeric: tabular-nums; }
+.pin { font-family: var(--mono); font-size: 0.72rem; color: var(--muted); }
+.thumbs { display: grid; grid-template-columns: repeat(5, minmax(0, 1fr)); gap: 4px; background: var(--mat); padding: 4px; border-radius: 3px; min-height: 40px; }
+.thumbs img { width: 100%; aspect-ratio: 1; display: block; }
+</style>
+
+<div class="wrap">
+  <header>
+    <h1>Lab vs wild gerbil calls in the paper VAE latent space</h1>
+    <p class="sub">Lab = dryad calls with the paper's latents and z70 clusters; wild = Mongolia calls encoded with the same checkpoint, clustered separately. Both plots always share one map. Hovering selects the cluster whose center (small ring) is nearest the cursor; the selection changes only when another center is clearly closer. Click to pin. Scroll to zoom, drag to pan; each plot moves on its own. Spectrograms are the 128 × 128 model inputs, 0.5 to 62.5 kHz bottom to top.</p>
+    <div class="switch" role="group" aria-label="Map">
+      <button type="button" data-m="proj" aria-pressed="true">UMAP fit on lab, wild projected</button>
+      <button type="button" data-m="joint" aria-pressed="false">UMAP fit on lab and wild together</button>
+    </div>
+  </header>
+  <div class="grid" id="grid"></div>
+</div>
+
+<template id="tpl">
+  <div class="card">
+    <div class="head">
+      <span class="tag"></span><span class="count"></span><span class="grow"></span>
+      <label><input type="checkbox" class="bycluster" checked> Color by cluster</label>
+      <button type="button" class="reset">Reset view</button>
+    </div>
+    <canvas></canvas>
+    <div class="readout">
+      <h2><span class="title">Hover the map</span><span class="pin"></span></h2>
+      <div class="stats">&nbsp;</div>
+      <div class="thumbs"></div>
+    </div>
+  </div>
+</template>
+
+<script>
+const DATA = /*DATA*/null;
+const css = n => getComputedStyle(document.documentElement).getPropertyValue(n).trim();
+const isDark = () => document.documentElement.dataset.theme === "dark" ||
+  (document.documentElement.dataset.theme !== "light" && matchMedia("(prefers-color-scheme: dark)").matches);
+const q = (a, p) => { const s = [...a].sort((u, v) => u - v); return s[Math.floor(p * (s.length - 1))]; };
+const KEYS = { proj: ["x", "y", "xy"], joint: ["xJ", "yJ", "xyJ"] };
+const FRAMES = {};
+for (const m of Object.keys(KEYS)) {  // one shared starting frame per map, from both datasets
+  const [kx, ky] = KEYS[m], ax = DATA.lab[kx].concat(DATA.wild[kx]), ay = DATA.lab[ky].concat(DATA.wild[ky]);
+  const a = q(ax, 0.003), b = q(ax, 0.997), c = q(ay, 0.003), e = q(ay, 0.997);
+  FRAMES[m] = { x0: a - 0.05 * (b - a), x1: b + 0.05 * (b - a), y0: c - 0.05 * (e - c), y1: e + 0.05 * (e - c) };
+}
+const HYST = 0.85;  // switch only when another center is closer than 85% of the current one's distance
+const plots = [];
+
+function makePlot(kind) {
+  const d = DATA[kind], list = DATA[kind + "Clusters"], clusters = Object.fromEntries(list.map(c => [c.id, c]));
+  const node = document.getElementById("tpl").content.firstElementChild.cloneNode(true);
+  node.classList.add(kind);
+  node.querySelector(".tag").textContent = kind === "lab" ? "Lab (dryad)" : "Wild (Mongolia)";
+  node.querySelector(".count").textContent = `${d.n.toLocaleString()} calls, ${d.x.length.toLocaleString()} drawn, ${list.length} clusters`;
+  document.getElementById("grid").appendChild(node);
+  const cv = node.querySelector("canvas"), ctx = cv.getContext("2d"), byCl = node.querySelector(".bycluster");
+  let mode = "proj", xs = d.x, ys = d.y, ck = "xy";
+  let view = { ...FRAMES.proj }, W = 0, H = 0, hover = null, pin = null, drag = null;
+
+  const sc = () => Math.min(W / (view.x1 - view.x0), H / (view.y1 - view.y0));
+  const off = () => { const s = sc(); return [(W - s * (view.x1 - view.x0)) / 2, (H - s * (view.y1 - view.y0)) / 2]; };
+  const sx = x => off()[0] + (x - view.x0) * sc();
+  const sy = y => H - (off()[1] + (y - view.y0) * sc());
+  const col = id => `hsl(${(id * 137.508 + (kind === "wild" ? 40 : 0)) % 360} 68% ${isDark() ? 62 : 44}%)`;
+
+  function draw() {
+    ctx.clearRect(0, 0, W, H);
+    const sel = pin ?? hover, r = 3.2, plain = css(kind === "lab" ? "--lab" : "--wild");
+    for (let pass = 0; pass < 2; pass++) for (let i = 0; i < xs.length; i++) {
+      const on = sel != null && d.c[i] === sel;
+      if ((pass === 1) !== on) continue;  // selected cluster drawn last, on top
+      ctx.globalAlpha = sel == null ? 0.55 : (on ? 0.95 : 0.15);
+      ctx.fillStyle = byCl.checked ? col(d.c[i]) : plain;
+      ctx.beginPath(); ctx.arc(sx(xs[i]), sy(ys[i]), on ? r + 0.8 : r, 0, 6.283); ctx.fill();
+    }
+    ctx.globalAlpha = 0.7; ctx.lineWidth = 1; ctx.strokeStyle = css("--fg");
+    for (const c of list) { const [x, y] = c[ck]; ctx.beginPath(); ctx.arc(sx(x), sy(y), 4, 0, 6.283); ctx.stroke(); }
+    ctx.globalAlpha = 1;
+    if (sel != null) { const [x0, y0] = clusters[sel][ck], x = sx(x0), y = sy(y0);
+      ctx.lineWidth = 4; ctx.strokeStyle = css("--panel"); ctx.beginPath(); ctx.arc(x, y, 10, 0, 6.283); ctx.stroke();
+      ctx.lineWidth = 2; ctx.strokeStyle = css("--fg"); ctx.beginPath(); ctx.arc(x, y, 10, 0, 6.283); ctx.stroke();
+      ctx.font = `500 12px ${css("--mono")}`; ctx.fillStyle = css("--fg");
+      ctx.fillText((kind === "lab" ? "z" : "W") + sel, x + 13, y - 9); }
+  }
+  function readout(id) {
+    const t = node.querySelector(".title"), s = node.querySelector(".stats"), g = node.querySelector(".thumbs");
+    node.querySelector(".pin").textContent = pin != null ? "pinned, click map to unpin" : "";
+    if (id == null) { t.textContent = "Hover the map"; s.innerHTML = "&nbsp;"; g.replaceChildren(); return; }
+    const c = clusters[id];
+    if (kind === "lab") { t.textContent = `Paper cluster z${c.id}`;
+      s.textContent = `${(100 * c.share).toFixed(1)}% of lab calls · 5 highest-confidence members`; }
+    else { t.textContent = `Wild cluster W${c.id}`;
+      s.textContent = `${c.n.toLocaleString()} calls (${(100 * c.share).toFixed(1)}%) · ${c.verified} human-verified · ${(100 * c.outside99).toFixed(0)}% outside lab range · 5 nearest centroid`; }
+    g.replaceChildren(...c.imgs.map((src, i) => { const im = new Image(); im.src = src; im.alt = `${kind} cluster ${c.id} example ${i + 1}`; return im; }));
+  }
+  // nearest cluster center in screen space, kept while no other center is clearly closer
+  function pick(px, py, keep) {
+    let best = null, bd = Infinity, kd = Infinity;
+    for (const c of list) { const [x, y] = c[ck], v = Math.hypot(sx(x) - px, sy(y) - py);
+      if (v < bd) { bd = v; best = c.id; } if (c.id === keep) kd = v; }
+    return keep != null && bd >= HYST * kd ? keep : best;
+  }
+  function size() { const r = cv.getBoundingClientRect(), dpr = window.devicePixelRatio || 1; W = r.width; H = r.height;
+    cv.width = Math.round(W * dpr); cv.height = Math.round(H * dpr); ctx.setTransform(dpr, 0, 0, dpr, 0, 0); draw(); }
+  function setMode(m) { mode = m; ck = KEYS[m][2]; xs = d[KEYS[m][0]]; ys = d[KEYS[m][1]]; view = { ...FRAMES[m] }; draw(); }
+
+  let raf = 0;
+  cv.addEventListener("pointerdown", e => { drag = { x: e.clientX, y: e.clientY, v: { ...view }, moved: false }; cv.setPointerCapture(e.pointerId); });
+  cv.addEventListener("pointermove", e => {
+    const r = cv.getBoundingClientRect(), px = e.clientX - r.left, py = e.clientY - r.top;
+    if (drag) { const dx = e.clientX - drag.x, dy = e.clientY - drag.y;
+      if (Math.abs(dx) + Math.abs(dy) > 4) drag.moved = true;
+      if (drag.moved) { const s = sc(); view = { x0: drag.v.x0 - dx / s, x1: drag.v.x1 - dx / s, y0: drag.v.y0 + dy / s, y1: drag.v.y1 + dy / s }; draw(); return; } }
+    if (pin != null) return;
+    const id = pick(px, py, hover);
+    if (id !== hover) { hover = id; cancelAnimationFrame(raf); raf = requestAnimationFrame(() => { draw(); readout(hover); }); }
+  });
+  cv.addEventListener("pointerup", e => {
+    if (drag && !drag.moved) { const r = cv.getBoundingClientRect(), id = pick(e.clientX - r.left, e.clientY - r.top, null);
+      pin = (pin != null && e.pointerType === "mouse") ? null : id; hover = id; draw(); readout(pin ?? hover); }
+    drag = null; });
+  cv.addEventListener("wheel", e => { e.preventDefault(); const r = cv.getBoundingClientRect(), s = sc(), [ox, oy] = off();
+    const gx = view.x0 + (e.clientX - r.left - ox) / s, gy = view.y0 + (H - (e.clientY - r.top) - oy) / s, f = Math.exp(e.deltaY * 0.0015);
+    view = { x0: gx + (view.x0 - gx) * f, x1: gx + (view.x1 - gx) * f, y0: gy + (view.y0 - gy) * f, y1: gy + (view.y1 - gy) * f }; draw(); }, { passive: false });
+  node.querySelector(".reset").onclick = () => { view = { ...FRAMES[mode] }; draw(); };
+  byCl.addEventListener("change", draw);
+  matchMedia("(prefers-color-scheme: dark)").addEventListener("change", draw);
+  new ResizeObserver(size).observe(cv);
+  pin = list.reduce((a, b) => (b.share > a.share ? b : a)).id; readout(pin);  // filled at rest: largest cluster
+  plots.push({ setMode });
+}
+makePlot("lab");
+makePlot("wild");
+document.querySelectorAll(".switch button").forEach(b => b.addEventListener("click", () => {
+  document.querySelectorAll(".switch button").forEach(o => o.setAttribute("aria-pressed", o === b ? "true" : "false"));
+  plots.forEach(p => p.setMode(b.dataset.m));
+}));
+</script>
