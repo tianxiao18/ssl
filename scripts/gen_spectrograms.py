@@ -1,6 +1,10 @@
 """
 Generate spectrogram PNGs from raw audio recordings (step 1).
 
+Any folder of WAVs:
+    python scripts/gen_spectrograms.py --input DIR [--h5] [--lo L --hi H]
+Each WAV gets its own output folder mirroring DIR. Then: scripts/run.py <model> --input <output>.
+
 Run this before any of the model scripts. recording_dir is always
 data/<dataset>[/<recording>] and spec_dir is always
 outputs/spectrograms/<dataset>[/<recording>] -- --dataset is required.
@@ -74,14 +78,23 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 from vox_tracer.paths import discover_channels, discover_recordings
-from vox_tracer.spec import calibrate_db_range, load_channel_audio, write_chunk_spectrograms
+import numpy as np
+from scipy.signal import spectrogram
+from vox_tracer.spec import (NOVERLAP, NPERSEG, SPEC_HI, SPEC_LO, calibrate_db_range, load_channel_audio,
+                             write_chunk_spectrograms, write_recording_spectrogram_h5)
 
 # Force fork on non-Windows so Mac workers don't re-import this script.
 if sys.platform != "win32":
     multiprocessing.set_start_method("fork", force=True)
 
 parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
-parser.add_argument("--dataset", required=True, help="any dir name under data/")
+parser.add_argument("--input", type=Path, default=None,
+                    help="any folder (or single .wav): every .wav under it becomes its own recording")
+parser.add_argument("--out", type=Path, default=None,
+                    help="--input mode output folder (default: outputs/spectrograms/<input folder name>)")
+parser.add_argument("--h5", action="store_true",
+                    help="--input mode: write one HDF5 per WAV instead of 1 s PNGs (use for long/many recordings)")
+parser.add_argument("--dataset", default=None, help="any dir name under data/ (alternative to --input)")
 parser.add_argument("--recording", default=None,
                     help="single recording, relative to data/<dataset> (omit to process every recording)")
 parser.add_argument("--channels",    default=None,
@@ -110,45 +123,94 @@ parser.add_argument("--all",         action="store_true",
                          "(the default when --recording is not given)")
 parser.add_argument("--workers",     type=int, default=4, help="parallel workers when --all is set (default: 4)")
 args = parser.parse_args()
+if (args.input is None) == (args.dataset is None):
+    parser.error("pass exactly one of --input or --dataset")
 args.all = args.all or (not args.recording and args.source_wav is None)
 if sys.platform == "win32" and args.workers > 1:
     print("WARNING: Windows does not support fork; clamping --workers to 1.")
     args.workers = 1
 
-recording_base = Path("data") / args.dataset
-if not recording_base.is_dir() and args.source_wav is None:
-    parser.error(f"{recording_base} does not exist")
-if args.channels:
-    channels = [int(c) for c in args.channels.split(",")]
-elif args.source_wav is not None:
-    parser.error("--source-wav requires --channels")
-else:
-    _scope = ([recording_base / args.recording] if args.recording else
-              [d for _, d in discover_recordings(recording_base, f"{args.prefix}_*.wav")])
-    channels = discover_channels(_scope, args.prefix)
-    print(f"channels (auto): {channels}")
-spec_base      = Path("outputs") / "spectrograms" / args.dataset
+if args.dataset:
+    recording_base = Path("data") / args.dataset
+    if not recording_base.is_dir() and args.source_wav is None:
+        parser.error(f"{recording_base} does not exist")
+    if args.channels:
+        channels = [int(c) for c in args.channels.split(",")]
+    elif args.source_wav is not None:
+        parser.error("--source-wav requires --channels")
+    else:
+        _scope = ([recording_base / args.recording] if args.recording else
+                  [d for _, d in discover_recordings(recording_base, f"{args.prefix}_*.wav")])
+        channels = discover_channels(_scope, args.prefix)
+        print(f"channels (auto): {channels}")
+    spec_base      = Path("outputs") / "spectrograms" / args.dataset
 
-if args.source_wav is not None:
-    if args.all:
-        parser.error("--source-wav is only valid without --all (one recording at a time)")
-    if not args.recording:
-        parser.error("--source-wav requires --recording <exp>/<idx>")
-    if len(channels) != 1:
-        parser.error("--source-wav requires exactly one --channels value")
-    rec_dir = recording_base / args.recording
-    rec_dir.mkdir(parents=True, exist_ok=True)
-    link = rec_dir / f"{args.prefix}_{channels[0]}_{args.source_wav.stem}.wav"
-    if not link.exists():
-        link.symlink_to(args.source_wav.resolve())
-        print(f"linked {link} -> {args.source_wav}")
+    if args.source_wav is not None:
+        if args.all:
+            parser.error("--source-wav is only valid without --all (one recording at a time)")
+        if not args.recording:
+            parser.error("--source-wav requires --recording <exp>/<idx>")
+        if len(channels) != 1:
+            parser.error("--source-wav requires exactly one --channels value")
+        rec_dir = recording_base / args.recording
+        rec_dir.mkdir(parents=True, exist_ok=True)
+        link = rec_dir / f"{args.prefix}_{channels[0]}_{args.source_wav.stem}.wav"
+        if not link.exists():
+            link.symlink_to(args.source_wav.resolve())
+            print(f"linked {link} -> {args.source_wav}")
 
 
-def _process_one(recording_dir, spec_dir, channels, chunk_sec, prefix, calibrate, lo, hi):
+def _warn_clipping(audio, sr, lo, hi, name, sec=10.0):
+    """Warn if the dB window turns the first few seconds almost all black or white."""
+    _, _, pxx = spectrogram(audio[: int(sec * sr)], fs=sr, nperseg=NPERSEG, noverlap=NOVERLAP)
+    db = 10 * np.log10(pxx + 1e-12)
+    black, white = (db <= lo).mean(), (db >= hi).mean()
+    if black > 0.98 or white > 0.5:
+        print(f"  WARNING {name}: {black:.0%} of pixels black, {white:.0%} white with lo/hi={lo}/{hi}; "
+              f"dB p90={np.percentile(db, 90):.0f}, max={db.max():.0f}. Set --lo/--hi for this rig.")
+
+
+def _run_pool(jobs, workers):
+    """Run _process_one over (recording_dir, spec_dir, channels, prefix) jobs."""
+    print(f"Found {len(jobs)} recordings, running with {workers} workers …")
+    done, failed = 0, 0
+    with ProcessPoolExecutor(max_workers=workers) as pool:
+        futures = {pool.submit(_process_one, str(rec), str(out), chs, args.chunk_sec, prefix,
+                               args.calibrate, args.lo, args.hi, args.h5): rec
+                   for rec, out, chs, prefix in jobs}
+        for fut in as_completed(futures):
+            try:
+                fut.result()
+                done += 1
+            except Exception as e:
+                print(f"ERROR {futures[fut]}: {e}")
+                failed += 1
+    print(f"\nDone: {done} succeeded, {failed} failed.")
+
+
+def _input_jobs(src, out_root):
+    """One job per .wav under src: spec dir out_root/<rel path>/<stem>/ with an audio_0_<stem>.wav link."""
+    src = src.resolve()
+    wavs = [src] if src.is_file() else sorted(p for p in src.rglob("*") if p.suffix.lower() == ".wav")
+    jobs = []
+    for wav in wavs:
+        rel = Path(wav.stem) if src.is_file() else wav.relative_to(src).with_suffix("")
+        spec_dir = out_root / rel
+        spec_dir.mkdir(parents=True, exist_ok=True)
+        link = spec_dir / f"audio_0_{wav.stem}.wav"
+        if not link.exists():
+            link.symlink_to(wav)
+        jobs.append((spec_dir, spec_dir, [0], "audio"))
+    return jobs
+
+
+def _process_one(recording_dir, spec_dir, channels, chunk_sec, prefix, calibrate, lo, hi, h5=False):
     spec_dir = Path(spec_dir)
     spec_dir.mkdir(parents=True, exist_ok=True)
     total = 0
     for ch in channels:
+        if h5 and list(spec_dir.glob(f"{prefix}_{ch}_*.h5")):
+            continue
         result = load_channel_audio(recording_dir, ch, prefix=prefix)
         if result is None:
             print(f"  {Path(recording_dir).name} ch{ch}: no {prefix}_{ch}_*.wav, skipping")
@@ -162,35 +224,29 @@ def _process_one(recording_dir, spec_dir, channels, chunk_sec, prefix, calibrate
             kw["lo"] = ch_lo
         if ch_hi is not None:
             kw["hi"] = ch_hi
+        _warn_clipping(audio, sr, kw.get("lo", SPEC_LO), kw.get("hi", SPEC_HI), base_name)
+        if h5:
+            write_recording_spectrogram_h5(audio, sr, spec_dir / f"{base_name}.h5", chunk_sec=chunk_sec, **kw)
+            total += 1
+            continue
         paths, _ = write_chunk_spectrograms(audio, sr, spec_dir, base_name, chunk_sec, **kw)
         total += len(paths)
-    print(f"  {Path(recording_dir).name} → {spec_dir} ({total} chunks)")
+    print(f"  {Path(recording_dir).name} → {spec_dir} ({total} {'h5' if h5 else 'chunks'})")
     return total
 
 
-if args.recording:
+if args.input:
+    out_root = args.out or Path("outputs") / "spectrograms" / args.input.resolve().stem
+    jobs = _input_jobs(args.input, out_root)
+    if not jobs:
+        parser.error(f"no .wav files under {args.input}")
+    _run_pool(jobs, args.workers)
+    print(f"Next: python scripts/run.py <model> --input {out_root}")
+elif args.recording:
     _process_one(recording_base / args.recording, spec_base / args.recording, channels,
                  args.chunk_sec, args.prefix, args.calibrate, args.lo, args.hi)
 elif args.all:
-    recordings = [(rec_dir, spec_base / rel)
-                  for rel, rec_dir in discover_recordings(recording_base, f"{args.prefix}_*.wav")]
-    print(f"Found {len(recordings)} recordings, running with {args.workers} workers …")
-
-    done, failed = 0, 0
-    with ProcessPoolExecutor(max_workers=args.workers) as pool:
-        futures = {
-            pool.submit(_process_one, str(rec), str(out), channels, args.chunk_sec,
-                       args.prefix, args.calibrate, args.lo, args.hi): rec
-            for rec, out in recordings
-        }
-        for fut in as_completed(futures):
-            try:
-                fut.result()
-                done += 1
-            except Exception as e:
-                print(f"ERROR {futures[fut]}: {e}")
-                failed += 1
-
-    print(f"\nDone: {done} succeeded, {failed} failed.")
+    _run_pool([(rec_dir, spec_base / rel, channels, args.prefix)
+               for rel, rec_dir in discover_recordings(recording_base, f"{args.prefix}_*.wav")], args.workers)
 else:
     parser.error("either --recording <exp>/<idx> or --all is required")

@@ -27,56 +27,54 @@ First-time SAM3 users must request access at https://huggingface.co/facebook/sam
 
 For SqueakOut, place the repo at `squeakout/` with weights at `squeakout/squeakout_weights.ckpt`.
 
-The fine-tuned SAM3 weights download to `checkpoints/` on first use, from the
+The fine-tuned SAM3 weights should download to `checkpoints/` on first use, from the
 [`sam3-ft-v1`](https://github.com/tianxiao18/ssl/releases/tag/sam3-ft-v1) release.
 
 ## Main pipeline
 
 ### Step 1 — Generate spectrograms
 
+**Any folder of WAVs** (simplest, no renaming or `data/` layout needed):
+
 ```bash
-python scripts/gen_spectrograms.py --dataset gerbil_ssl --workers 8
-python scripts/gen_spectrograms.py --dataset my_dataset --prefix mic --lo -95 --hi -57 --workers 8
+python scripts/gen_spectrograms.py --input /path/to/wavs --lo -100 --hi -50 --h5 --workers 8
 ```
 
-Reads `data/<dataset>/**/{prefix}_{ch}_*.wav` (one folder per recording, any depth) and writes
-1-second dB spectrogram PNGs to `outputs/spectrograms/<dataset>/`. `--lo/--hi` set the dB range for
-your rig (`--help` lists known values). `scripts/gen_spectrograms_h5.py` does the same as one HDF5
-per recording, for long recordings.
+Each WAV gets its own folder, mirroring the input tree, under `outputs/spectrograms/<input name>/` (or `--out`).
+
+- `--h5`: one HDF5 per WAV instead of one PNG per second. Use for long recordings.
+- `--lo/--hi`: dB range for your rig (default fits gerbil_ssl only). Delete old output before changing it.
 
 ---
 
 ### Step 2 — Run segmentation
 
 All models are invoked through a single unified script,
-`scripts/run.py <model> [out_dir] --dataset <dataset> [options]`. It writes
-`<out_dir>/<dataset>/<recording>/coco_ch_<ch>.json`; `out_dir` defaults to `outputs/<model>`.
+`scripts/run.py <model> [out_dir] --input <step 1 output> [options]`. It writes
+`<out_dir>/<input name>/<recording>/coco_ch_<ch>.json`; `out_dir` defaults to `outputs/<model>`.
 
-**Fine-tuned SAM3** (text prompt "trace", fine-tuned on gerbil_ssl; GPU recommended). Two variants:
-`sam3_ft_seg` (masks from the fine-tuned mask head) and `sam3_ft_box2mask` (fine-tuned boxes, masks
-from the original SAM3).
+**Fine-tuned SAM3** (text prompt "trace", fine-tuned on gerbil_ssl; GPU recommended):
 ```bash
-python scripts/run.py sam3_ft_seg --dataset gerbil_ssl
-python scripts/run.py sam3_ft_box2mask --dataset my_dataset --prefix mic
+python scripts/run.py sam3_ft_box2mask --input outputs/spectrograms/<input name>
 ```
 `--threshold` (default 0.5) trades recall for precision.
 
 **Ridge filter** (default: sato; choices: sato, meijering, frangi, hessian):
 ```bash
-python scripts/run.py ridge outputs/ridge_flatness --dataset gerbil_ssl --workers 16
+python scripts/run.py ridge --input outputs/spectrograms/<input name> --workers 16
 ```
 
 **SqueakOut:**
 ```bash
-python scripts/run.py squeakout --dataset gerbil_ssl
+python scripts/run.py squeakout --input outputs/spectrograms/<input name>
 ```
 
 **SAM3, zero-shot** (box prompts from the sato ridge filter):
 ```bash
-python scripts/run.py sam3 --dataset gerbil_ssl --sam3-checkpoint sam3/sam3.pt
+python scripts/run.py sam3 --input outputs/spectrograms/<input name> --sam3-checkpoint sam3/sam3.pt
 ```
 
-**DAS + YOLO** (needs raw audio + DAS CSV; spectrograms must be pre-generated):
+**DAS + YOLO** (named datasets only, `--dataset`; needs raw audio + DAS CSV):
 ```bash
 python scripts/run.py das_yolo --dataset gerbil_ssl --recording experiment_384/idx_000
 ```
@@ -94,13 +92,13 @@ every path. Pointing them at a single recording's folders evaluates just that re
 
 ```bash
 python scripts/evaluate.py outputs/spectrograms/gerbil_ssl outputs/das_yolo/gerbil_ssl data/gerbil_ssl \
-    outputs/sam3_ft_seg/gerbil_ssl outputs/eval/gerbil_ssl/sam3_ft_seg --workers 4
+    outputs/sam3_ft_box2mask/gerbil_ssl outputs/eval/gerbil_ssl/sam3_ft_box2mask --workers 4
 ```
 
 Writes `metrics.csv` (TP/FP/FN/Recall/Precision/F1 per session/channel) and,
 optionally, montage pages (`--montage-samples N`) and a full-session
 visualization strip (`--viz-session`). Run once per method into its own output dir
-under `outputs/eval/<dataset>/` (e.g. `outputs/eval/gerbil_ssl/sam3_ft_seg`,
+under `outputs/eval/<dataset>/` (e.g. `outputs/eval/gerbil_ssl/sam3_ft_box2mask`,
 `outputs/eval/gerbil_ssl/sam3`, `outputs/eval/gerbil_ssl/ridge`).
 
 ---

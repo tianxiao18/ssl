@@ -14,6 +14,9 @@ Single recording:
     python scripts/run.py ridge     <out_dir> --dataset <dataset> --recording <exp>/<idx> [options]
     python scripts/run.py das_yolo  <out_dir> --dataset <dataset> --recording <exp>/<idx> [options]
 
+Any folder made by `gen_spectrograms.py --input` (output mirrors its tree under <out_dir>/<folder name>):
+    python scripts/run.py sam3_ft_seg [out_dir] --input outputs/spectrograms/<folder name>
+
 All recordings in the dataset:
     python scripts/run.py ridge    [out_dir] --dataset <dataset> --workers 8
     python scripts/run.py das_yolo [out_dir] --dataset <dataset>
@@ -103,7 +106,9 @@ def _add_spec_args(p):
     p.add_argument("out_dir", nargs="?", default=None,
                    help="stage/variant name, e.g. outputs/ridge_flatness (default: outputs/<model>; "
                         "dataset is appended automatically)")
-    p.add_argument("--dataset", required=True, help="any dataset under outputs/spectrograms[_h5]/")
+    p.add_argument("--input", default=None,
+                   help="spectrogram folder written by gen_spectrograms.py --input (alternative to --dataset)")
+    p.add_argument("--dataset", default=None, help="any dataset under outputs/spectrograms[_h5]/")
     p.add_argument("--recording", default=None,
                    help="single recording, relative to the dataset (omit to process every recording)")
     p.add_argument("--recordings-file", default=None,
@@ -111,10 +116,11 @@ def _add_spec_args(p):
                         "(e.g. one shard per Slurm array task)")
     p.add_argument("--channels", default=None,
                    help="comma-separated channel ids (default: every channel found in the spectrograms)")
-    p.add_argument("--prefix",  default="headmic",
+    p.add_argument("--prefix",  default=None,
                    help="recording-stream filename prefix, matching '{prefix}_{ch}_..._t{t0}-{t1}.png' "
                         "spectrograms and '{prefix}_{ch}_*.wav' audio (default: headmic, the gerbil_ssl "
-                        "multi-mic rig). A single-stream dataset can pass its own label with --channels 0.")
+                        "multi-mic rig; 'audio' with --input). A single-stream dataset can pass its own "
+                        "label with --channels 0.")
     p.add_argument("--all",     action="store_true",
                    help="process every recording in the dataset (the default when --recording is not given)")
     p.add_argument("--workers", type=int, default=1,
@@ -246,7 +252,13 @@ p_yolo.add_argument("--all",       action="store_true",
 p_yolo.add_argument("--workers",   type=int, default=1)
 
 args = parser.parse_args()
+args.input = getattr(args, "input", None)
+if (args.input is None) == (args.dataset is None):
+    parser.error("pass exactly one of --input or --dataset")
+if hasattr(args, "prefix"):
+    args.prefix = args.prefix or ("audio" if args.input else "headmic")
 args.out_dir = args.out_dir or f"outputs/{args.model}"
+name = args.dataset or Path(args.input).resolve().name
 args.all = args.all or not args.recording
 if sys.platform == "win32" and args.workers > 1:
     print("WARNING: Windows does not support fork; clamping --workers to 1.")
@@ -306,10 +318,15 @@ elif args.model == "das_yolo":
 # sam3, ridge and squeakout auto-detect PNG- vs HDF5-backed datasets: prefer outputs/spectrograms/<dataset>
 # (scripts/gen_spectrograms.py) if it exists, else fall back to
 # outputs/spectrograms_h5/<dataset> (scripts/gen_spectrograms_h5.py, e.g. dryad_gerbil_full).
-_png_base = Path("outputs") / "spectrograms" / args.dataset
-_h5_base  = Path("outputs") / "spectrograms_h5" / args.dataset
-uses_h5 = (args.model in ("sam3", "ridge", "squeakout", "sam3_ft_seg", "sam3_ft_box2mask")
-           and not _png_base.exists() and _h5_base.exists())
+_png_base = Path(args.input) if args.input else Path("outputs") / "spectrograms" / args.dataset
+_h5_base  = Path("outputs") / "spectrograms_h5" / name
+_h5_models = ("sam3", "ridge", "squeakout", "sam3_ft_seg", "sam3_ft_box2mask")
+if args.input:  # --input folder holds either PNGs or HDF5s (gen_spectrograms.py --input [--h5])
+    uses_h5 = (args.model in _h5_models and _png_base.is_dir()
+               and next(_png_base.rglob(f"{args.prefix}_*.png"), None) is None)
+    _h5_base = _png_base
+else:
+    uses_h5 = args.model in _h5_models and not _png_base.exists() and _h5_base.exists()
 spec_base = _h5_base if uses_h5 else _png_base
 if not spec_base.is_dir():
     parser.error(f"{spec_base} does not exist -- run scripts/gen_spectrograms.py first")
@@ -322,13 +339,18 @@ else:
     kw["channels"] = discover_channels(_scope, _prefix, "h5" if uses_h5 else "png")
     print(f"channels (auto): {kw['channels']}")
 channels = kw["channels"]
-out_base  = Path(args.out_dir) / args.dataset
-reject_base = (Path(args.reject_out_dir) / args.dataset
+out_base  = Path(args.out_dir) / name
+reject_base = (Path(args.reject_out_dir) / name
                if args.model == "ridge" and args.reject_out_dir else None)
 data_base = Path("data") / args.dataset if args.model == "das_yolo" else None
 
+# --input mode: each spec dir holds a link to its source WAV, so audio-gated models read it there
+_audio_in_spec = bool(args.input) and args.model in ("ridge", "squeakout", "sam3") and not args.recording_dir
+
 if args.recording:
     spec_dir = spec_base / args.recording
+    if _audio_in_spec:
+        kw["recording_dir"] = str(spec_dir)
     out_dir  = out_base / args.recording
     if args.model == "das_yolo":
         kw["recording_dir"] = str(data_base / args.recording)
@@ -360,6 +382,8 @@ elif args.all:
             for rel, idx_dir in _discover(spec_base, args.prefix)
         ]
 
+    if _audio_in_spec:
+        tasks = [(sd, od, {**tkw, "recording_dir": sd}) for sd, od, tkw in tasks]
     if getattr(args, "recordings_file", None):
         keep = {x.strip() for x in open(args.recordings_file) if x.strip()}
         tasks = [t for t in tasks if Path(t[0]).relative_to(spec_base).as_posix() in keep]
