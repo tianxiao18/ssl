@@ -52,6 +52,7 @@ Each WAV gets its own folder, mirroring the input tree, under `outputs/spectrogr
 All models are invoked through a single unified script,
 `scripts/run.py <model> [out_dir] --input <step 1 output> [options]`. It writes
 `<out_dir>/<input name>/<recording>/coco_ch_<ch>.json`; `out_dir` defaults to `outputs/<model>`.
+Each also gets a DAS GUI `<wav stem>_annotations.csv`, auto-loaded when opening the WAV in the spectrogram folder.
 
 **Fine-tuned SAM3** (text prompt "trace", fine-tuned on gerbil_ssl; GPU recommended):
 ```bash

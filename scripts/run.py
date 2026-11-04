@@ -75,9 +75,27 @@ def _discover_h5(base, channels, prefix):
         yield rel, Path(base) / rel
 
 
+def _export_das(spec_dir, out_dir, prefix, input_mode):
+    """<wav stem>_annotations.csv (DAS GUI format) next to each coco_ch_<ch>.json; in --input mode also
+    next to the WAV link in spec_dir, so DAS auto-loads it."""
+    import json
+    from vox_tracer.coco import coco_intervals, write_das_csv
+    from vox_tracer.paths import recording_dir_from_spec_dir
+    audio_dir = Path(spec_dir) if input_mode else recording_dir_from_spec_dir(spec_dir)
+    for js in sorted(Path(out_dir).glob("coco_ch_*.json")):
+        ch = js.stem.removeprefix("coco_ch_")
+        wavs = sorted(audio_dir.glob(f"{prefix}_{ch}_*.wav")) if audio_dir.is_dir() else []
+        iv = coco_intervals(json.load(open(js)))
+        stem = wavs[0].resolve().stem if wavs else js.stem
+        write_das_csv(iv, Path(out_dir) / f"{stem}_annotations.csv")
+        if input_mode and wavs:
+            write_das_csv(iv, wavs[0].with_name(f"{wavs[0].stem}_annotations.csv"))
+
+
 def _run_one(model, spec_dir, out_dir, kw):
     """Dispatch to the appropriate run_* function. Top-level so workers can pickle it."""
     kw = dict(kw)
+    das = kw.pop("_das", None)
     if model == "ridge":
         from vox_tracer.ridge import run_ridge
         run_ridge(spec_dir, out_dir, **kw)
@@ -93,6 +111,8 @@ def _run_one(model, spec_dir, out_dir, kw):
     elif model == "das_yolo":
         from vox_tracer.das_yolo import run_yolo
         run_yolo(kw.pop("recording_dir"), spec_dir, out_dir, **kw)
+    if das:
+        _export_das(spec_dir, out_dir, *das)
 
 
 parser = argparse.ArgumentParser(
@@ -314,6 +334,8 @@ elif args.model in ("sam3_ft_seg", "sam3_ft_box2mask"):
         kw["checkpoint"] = str(fetch_checkpoint(VARIANTS[kw["variant"]][1]))
 elif args.model == "das_yolo":
     kw = dict(chunk_sec=args.chunk_sec)
+
+kw["_das"] = (getattr(args, "prefix", None) or "headmic", bool(args.input))
 
 # sam3, ridge and squeakout auto-detect PNG- vs HDF5-backed datasets: prefer outputs/spectrograms/<dataset>
 # (scripts/gen_spectrograms.py) if it exists, else fall back to

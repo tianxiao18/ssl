@@ -82,3 +82,24 @@ def bbox_annotation(ann_id, image_id, x1, y1, x2, y2):
         "area": bw * bh,
         "iscrowd": 0,
     }
+
+
+def coco_intervals(coco):
+    """Merged (start_s, stop_s) call intervals from a coco_ch_<ch>.json dict."""
+    from vox_tracer.scoring import merge_intervals
+    imgs = {im["id"]: im for im in coco["images"]}
+    iv = []
+    for a in coco["annotations"]:
+        im = imgs[a["image_id"]]
+        t0, t1 = im["window_start_sec"], im["window_end_sec"]
+        x, _, w, _ = a["bbox"]
+        iv.append((t0 + x / im["width"] * (t1 - t0), t0 + (x + w) / im["width"] * (t1 - t0)))
+    return merge_intervals(iv)
+
+
+def write_das_csv(intervals, path, name="vox"):
+    """DAS GUI annotations: name,start_seconds,stop_seconds."""
+    with open(path, "w") as f:
+        f.write("name,start_seconds,stop_seconds\n")
+        for s, e in intervals:
+            f.write(f"{name},{s:.6f},{e:.6f}\n")
