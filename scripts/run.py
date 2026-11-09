@@ -43,16 +43,11 @@ python scripts/run.py sam3 outputs/sam3_h5 --dataset dryad_gerbil_full \
     --channels 0 --prefix mic --sam3-checkpoint sam3/sam3.pt
 """
 import argparse
-import multiprocessing
 import sys
 from concurrent.futures import ProcessPoolExecutor, as_completed
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
-
-# Force fork on non-Windows so Mac workers don't re-import this script.
-if sys.platform != "win32":
-    multiprocessing.set_start_method("fork", force=True)
 
 from vox_tracer.paths import discover_channels, discover_recordings
 
@@ -271,167 +266,171 @@ p_yolo.add_argument("--all",       action="store_true",
                     help="process every recording in the dataset (the default when --recording is not given)")
 p_yolo.add_argument("--workers",   type=int, default=1)
 
-args = parser.parse_args()
-args.input = getattr(args, "input", None)
-if (args.input is None) == (args.dataset is None):
-    parser.error("pass exactly one of --input or --dataset")
-if hasattr(args, "prefix"):
-    args.prefix = args.prefix or ("audio" if args.input else "headmic")
-args.out_dir = args.out_dir or f"outputs/{args.model}"
-name = args.dataset or Path(args.input).resolve().name
-args.all = args.all or not args.recording
-if sys.platform == "win32" and args.workers > 1:
-    print("WARNING: Windows does not support fork; clamping --workers to 1.")
-    args.workers = 1
-if args.model == "das_yolo" and not args.channels:
-    parser.error("das_yolo requires --channels")
 
-# Build model kwargs
-if args.model == "ridge":
-    kw = dict(filter_name=args.filter,
-              sigmas=[float(s) for s in args.sigmas.split(",")],
-              threshold_pct=args.threshold_pct,
-              sample_rate=args.sample_rate, freq_min=args.freq_min,
-              min_area=args.min_area, recording_dir=args.recording_dir,
-              max_mask_area_frac=args.max_mask_area_frac,
-              min_freq_sweep_frac=args.min_freq_sweep_frac,
-              min_mask_cols=args.min_mask_cols,
-              min_centroid_hz=args.min_centroid_hz,
-              max_flatness=args.max_flatness,
-              prefix=args.prefix, chunk_sec=args.chunk_sec)
-elif args.model == "squeakout":
-    kw = dict(checkpoint=args.checkpoint, batch_size=args.batch_size,
-              mask_threshold=args.mask_threshold, overwrite=args.overwrite,
-              recording_dir=args.recording_dir,
-              max_mask_area_frac=args.max_mask_area_frac,
-              min_freq_sweep_frac=args.min_freq_sweep_frac,
-              min_mask_cols=args.min_mask_cols,
-              min_centroid_hz=args.min_centroid_hz,
-              max_flatness=args.max_flatness,
-              prefix=args.prefix, chunk_sec=args.chunk_sec)
-elif args.model == "sam3":
-    kw = dict(checkpoint=args.sam3_checkpoint,
-              sigmas=[float(s) for s in args.sigmas.split(",")],
-              threshold_pct=args.threshold_pct, score_threshold=args.score_threshold,
-              sample_rate=args.sample_rate, freq_min=args.freq_min,
-              min_area=args.min_area, vert_aspect=args.vert_aspect,
-              horiz_aspect=args.horiz_aspect,
-              close_kernel=tuple(int(s) for s in args.close_kernel.split(",")),
-              recording_dir=args.recording_dir,
-              max_mask_area_frac=args.max_mask_area_frac,
-              min_freq_sweep_frac=args.min_freq_sweep_frac,
-              min_mask_cols=args.min_mask_cols,
-              min_centroid_hz=args.min_centroid_hz,
-              max_flatness=args.max_flatness,
-              overwrite=args.overwrite,
-              prefix=args.prefix,
-              chunk_sec=args.chunk_sec)
-elif args.model in ("sam3_ft_seg", "sam3_ft_box2mask"):
-    kw = dict(variant=args.model.removeprefix("sam3_ft_"), checkpoint=args.checkpoint,
-              threshold=args.threshold, prefix=args.prefix, chunk_sec=args.chunk_sec, overwrite=args.overwrite)
-    if not args.checkpoint:  # download once here, not in every worker
-        from vox_tracer.sam3_ft_runner import VARIANTS, fetch_checkpoint
-        kw["checkpoint"] = str(fetch_checkpoint(VARIANTS[kw["variant"]][1]))
-elif args.model == "das_yolo":
-    kw = dict(chunk_sec=args.chunk_sec)
+def main():
+    args = parser.parse_args()
+    args.input = getattr(args, "input", None)
+    if (args.input is None) == (args.dataset is None):
+        parser.error("pass exactly one of --input or --dataset")
+    if hasattr(args, "prefix"):
+        args.prefix = args.prefix or ("audio" if args.input else "headmic")
+    args.out_dir = args.out_dir or f"outputs/{args.model}"
+    name = args.dataset or Path(args.input).resolve().name
+    args.all = args.all or not args.recording
+    if args.model == "das_yolo" and not args.channels:
+        parser.error("das_yolo requires --channels")
 
-kw["_das"] = (getattr(args, "prefix", None) or "headmic", bool(args.input))
+    # Build model kwargs
+    if args.model == "ridge":
+        kw = dict(filter_name=args.filter,
+                  sigmas=[float(s) for s in args.sigmas.split(",")],
+                  threshold_pct=args.threshold_pct,
+                  sample_rate=args.sample_rate, freq_min=args.freq_min,
+                  min_area=args.min_area, recording_dir=args.recording_dir,
+                  max_mask_area_frac=args.max_mask_area_frac,
+                  min_freq_sweep_frac=args.min_freq_sweep_frac,
+                  min_mask_cols=args.min_mask_cols,
+                  min_centroid_hz=args.min_centroid_hz,
+                  max_flatness=args.max_flatness,
+                  prefix=args.prefix, chunk_sec=args.chunk_sec)
+    elif args.model == "squeakout":
+        kw = dict(checkpoint=args.checkpoint, batch_size=args.batch_size,
+                  mask_threshold=args.mask_threshold, overwrite=args.overwrite,
+                  recording_dir=args.recording_dir,
+                  max_mask_area_frac=args.max_mask_area_frac,
+                  min_freq_sweep_frac=args.min_freq_sweep_frac,
+                  min_mask_cols=args.min_mask_cols,
+                  min_centroid_hz=args.min_centroid_hz,
+                  max_flatness=args.max_flatness,
+                  prefix=args.prefix, chunk_sec=args.chunk_sec)
+    elif args.model == "sam3":
+        kw = dict(checkpoint=args.sam3_checkpoint,
+                  sigmas=[float(s) for s in args.sigmas.split(",")],
+                  threshold_pct=args.threshold_pct, score_threshold=args.score_threshold,
+                  sample_rate=args.sample_rate, freq_min=args.freq_min,
+                  min_area=args.min_area, vert_aspect=args.vert_aspect,
+                  horiz_aspect=args.horiz_aspect,
+                  close_kernel=tuple(int(s) for s in args.close_kernel.split(",")),
+                  recording_dir=args.recording_dir,
+                  max_mask_area_frac=args.max_mask_area_frac,
+                  min_freq_sweep_frac=args.min_freq_sweep_frac,
+                  min_mask_cols=args.min_mask_cols,
+                  min_centroid_hz=args.min_centroid_hz,
+                  max_flatness=args.max_flatness,
+                  overwrite=args.overwrite,
+                  prefix=args.prefix,
+                  chunk_sec=args.chunk_sec)
+    elif args.model in ("sam3_ft_seg", "sam3_ft_box2mask"):
+        kw = dict(variant=args.model.removeprefix("sam3_ft_"), checkpoint=args.checkpoint,
+                  threshold=args.threshold, prefix=args.prefix, chunk_sec=args.chunk_sec, overwrite=args.overwrite)
+        if not args.checkpoint:  # download once here, not in every worker
+            from vox_tracer.sam3_ft_runner import VARIANTS, fetch_checkpoint
+            kw["checkpoint"] = str(fetch_checkpoint(VARIANTS[kw["variant"]][1]))
+    elif args.model == "das_yolo":
+        kw = dict(chunk_sec=args.chunk_sec)
 
-# sam3, ridge and squeakout auto-detect PNG- vs HDF5-backed datasets: prefer outputs/spectrograms/<dataset>
-# (scripts/gen_spectrograms.py) if it exists, else fall back to
-# outputs/spectrograms_h5/<dataset> (scripts/gen_spectrograms_h5.py, e.g. dryad_gerbil_full).
-_png_base = Path(args.input) if args.input else Path("outputs") / "spectrograms" / args.dataset
-_h5_base  = Path("outputs") / "spectrograms_h5" / name
-_h5_models = ("sam3", "ridge", "squeakout", "sam3_ft_seg", "sam3_ft_box2mask")
-if args.input:  # --input folder holds either PNGs or HDF5s (gen_spectrograms.py --input [--h5])
-    uses_h5 = (args.model in _h5_models and _png_base.is_dir()
-               and next(_png_base.rglob(f"{args.prefix}_*.png"), None) is None)
-    _h5_base = _png_base
-else:
-    uses_h5 = args.model in _h5_models and not _png_base.exists() and _h5_base.exists()
-spec_base = _h5_base if uses_h5 else _png_base
-if not spec_base.is_dir():
-    parser.error(f"{spec_base} does not exist -- run scripts/gen_spectrograms.py first")
-if args.channels:
-    kw["channels"] = [int(c) for c in args.channels.split(",")]
-else:
-    _prefix = getattr(args, "prefix", "headmic")
-    _scope = ([spec_base / args.recording] if args.recording else
-              [d for _, d in discover_recordings(spec_base, f"{_prefix}_*.{'h5' if uses_h5 else 'png'}")])
-    kw["channels"] = discover_channels(_scope, _prefix, "h5" if uses_h5 else "png")
-    print(f"channels (auto): {kw['channels']}")
-channels = kw["channels"]
-out_base  = Path(args.out_dir) / name
-reject_base = (Path(args.reject_out_dir) / name
-               if args.model == "ridge" and args.reject_out_dir else None)
-data_base = Path("data") / args.dataset if args.model == "das_yolo" else None
+    kw["_das"] = (getattr(args, "prefix", None) or "headmic", bool(args.input))
 
-# --input mode: each spec dir holds a link to its source WAV, so audio-gated models read it there
-_audio_in_spec = bool(args.input) and args.model in ("ridge", "squeakout", "sam3") and not args.recording_dir
-
-if args.recording:
-    spec_dir = spec_base / args.recording
-    if _audio_in_spec:
-        kw["recording_dir"] = str(spec_dir)
-    out_dir  = out_base / args.recording
-    if args.model == "das_yolo":
-        kw["recording_dir"] = str(data_base / args.recording)
-    elif args.model == "ridge" and reject_base:
-        kw["reject_out_dir"] = str(reject_base / args.recording)
-    _run_one(args.model, str(spec_dir), str(out_dir), kw)
-elif args.all:
-    if args.model == "das_yolo":
-        tasks = [
-            (str(idx_dir), str(out_base / rel), {**kw, "recording_dir": str(data_base / rel)})
-            for rel, idx_dir in _discover(spec_base)
-        ]
-    elif args.model == "ridge" and reject_base:
-        discovered = (_discover_h5(spec_base, channels, args.prefix) if uses_h5
-                      else _discover(spec_base, args.prefix))
-        tasks = [
-            (str(idx_dir), str(out_base / rel),
-             {**kw, "reject_out_dir": str(reject_base / rel)})
-            for rel, idx_dir in discovered
-        ]
-    elif uses_h5:
-        tasks = [
-            (str(rec_dir), str(out_base / rel), kw)
-            for rel, rec_dir in _discover_h5(spec_base, channels, args.prefix)
-        ]
+    # sam3, ridge and squeakout auto-detect PNG- vs HDF5-backed datasets: prefer outputs/spectrograms/<dataset>
+    # (scripts/gen_spectrograms.py) if it exists, else fall back to
+    # outputs/spectrograms_h5/<dataset> (scripts/gen_spectrograms_h5.py, e.g. dryad_gerbil_full).
+    _png_base = Path(args.input) if args.input else Path("outputs") / "spectrograms" / args.dataset
+    _h5_base  = Path("outputs") / "spectrograms_h5" / name
+    _h5_models = ("sam3", "ridge", "squeakout", "sam3_ft_seg", "sam3_ft_box2mask")
+    if args.input:  # --input folder holds either PNGs or HDF5s (gen_spectrograms.py --input [--h5])
+        uses_h5 = (args.model in _h5_models and _png_base.is_dir()
+                   and next(_png_base.rglob(f"{args.prefix}_*.png"), None) is None)
+        _h5_base = _png_base
     else:
-        tasks = [
-            (str(idx_dir), str(out_base / rel), kw)
-            for rel, idx_dir in _discover(spec_base, args.prefix)
-        ]
-
-    if _audio_in_spec:
-        tasks = [(sd, od, {**tkw, "recording_dir": sd}) for sd, od, tkw in tasks]
-    if getattr(args, "recordings_file", None):
-        keep = {x.strip() for x in open(args.recordings_file) if x.strip()}
-        tasks = [t for t in tasks if Path(t[0]).relative_to(spec_base).as_posix() in keep]
-    print(f"Found {len(tasks)} recordings, {args.workers} worker(s) …")
-    done, failed = 0, 0
-
-    if args.workers == 1:
-        for spec_dir, out_dir, task_kw in tasks:
-            try:
-                _run_one(args.model, spec_dir, out_dir, task_kw)
-                done += 1
-            except Exception as e:
-                print(f"ERROR {spec_dir}: {e}")
-                failed += 1
+        uses_h5 = args.model in _h5_models and not _png_base.exists() and _h5_base.exists()
+    spec_base = _h5_base if uses_h5 else _png_base
+    if not spec_base.is_dir():
+        parser.error(f"{spec_base} does not exist -- run scripts/gen_spectrograms.py first")
+    if args.channels:
+        kw["channels"] = [int(c) for c in args.channels.split(",")]
     else:
-        with ProcessPoolExecutor(max_workers=args.workers) as pool:
-            futures = {
-                pool.submit(_run_one, args.model, s, o, kw_): s
-                for s, o, kw_ in tasks
-            }
-            for fut in as_completed(futures):
+        _prefix = getattr(args, "prefix", "headmic")
+        _scope = ([spec_base / args.recording] if args.recording else
+                  [d for _, d in discover_recordings(spec_base, f"{_prefix}_*.{'h5' if uses_h5 else 'png'}")])
+        kw["channels"] = discover_channels(_scope, _prefix, "h5" if uses_h5 else "png")
+        print(f"channels (auto): {kw['channels']}")
+    channels = kw["channels"]
+    out_base  = Path(args.out_dir) / name
+    reject_base = (Path(args.reject_out_dir) / name
+                   if args.model == "ridge" and args.reject_out_dir else None)
+    data_base = Path("data") / args.dataset if args.model == "das_yolo" else None
+
+    # --input mode: each spec dir holds a link to its source WAV, so audio-gated models read it there
+    _audio_in_spec = bool(args.input) and args.model in ("ridge", "squeakout", "sam3") and not args.recording_dir
+
+    if args.recording:
+        spec_dir = spec_base / args.recording
+        if _audio_in_spec:
+            kw["recording_dir"] = str(spec_dir)
+        out_dir  = out_base / args.recording
+        if args.model == "das_yolo":
+            kw["recording_dir"] = str(data_base / args.recording)
+        elif args.model == "ridge" and reject_base:
+            kw["reject_out_dir"] = str(reject_base / args.recording)
+        _run_one(args.model, str(spec_dir), str(out_dir), kw)
+    elif args.all:
+        if args.model == "das_yolo":
+            tasks = [
+                (str(idx_dir), str(out_base / rel), {**kw, "recording_dir": str(data_base / rel)})
+                for rel, idx_dir in _discover(spec_base)
+            ]
+        elif args.model == "ridge" and reject_base:
+            discovered = (_discover_h5(spec_base, channels, args.prefix) if uses_h5
+                          else _discover(spec_base, args.prefix))
+            tasks = [
+                (str(idx_dir), str(out_base / rel),
+                 {**kw, "reject_out_dir": str(reject_base / rel)})
+                for rel, idx_dir in discovered
+            ]
+        elif uses_h5:
+            tasks = [
+                (str(rec_dir), str(out_base / rel), kw)
+                for rel, rec_dir in _discover_h5(spec_base, channels, args.prefix)
+            ]
+        else:
+            tasks = [
+                (str(idx_dir), str(out_base / rel), kw)
+                for rel, idx_dir in _discover(spec_base, args.prefix)
+            ]
+
+        if _audio_in_spec:
+            tasks = [(sd, od, {**tkw, "recording_dir": sd}) for sd, od, tkw in tasks]
+        if getattr(args, "recordings_file", None):
+            keep = {x.strip() for x in open(args.recordings_file) if x.strip()}
+            tasks = [t for t in tasks if Path(t[0]).relative_to(spec_base).as_posix() in keep]
+        print(f"Found {len(tasks)} recordings, {args.workers} worker(s) …")
+        done, failed = 0, 0
+
+        if args.workers == 1:
+            for spec_dir, out_dir, task_kw in tasks:
                 try:
-                    fut.result()
+                    _run_one(args.model, spec_dir, out_dir, task_kw)
                     done += 1
                 except Exception as e:
-                    print(f"ERROR {futures[fut]}: {e}")
+                    print(f"ERROR {spec_dir}: {e}")
                     failed += 1
+        else:
+            with ProcessPoolExecutor(max_workers=args.workers) as pool:
+                futures = {
+                    pool.submit(_run_one, args.model, s, o, kw_): s
+                    for s, o, kw_ in tasks
+                }
+                for fut in as_completed(futures):
+                    try:
+                        fut.result()
+                        done += 1
+                    except Exception as e:
+                        print(f"ERROR {futures[fut]}: {e}")
+                        failed += 1
 
-    print(f"\nDone: {done} succeeded, {failed} failed.")
+        print(f"\nDone: {done} succeeded, {failed} failed.")
+
+
+# Workers re-import this file on Windows/macOS (spawn), so nothing may run at import time.
+if __name__ == "__main__":
+    main()

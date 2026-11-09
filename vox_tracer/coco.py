@@ -68,7 +68,7 @@ def save_coco_per_channel(coco_by_ch, out_dir):
         p = out_dir / f"coco_ch_{ch}.json"
         with open(p, "w") as f:
             json.dump(coco, f, indent=2)
-        print(f"ch {ch}: {len(coco['annotations'])} annotations → {p}")
+        print(f"ch {ch}: {len(coco['annotations'])} annotations -> {p}")
 
 
 def bbox_annotation(ann_id, image_id, x1, y1, x2, y2):

@@ -44,7 +44,6 @@ import argparse
 import csv
 import json
 import math
-import multiprocessing
 import os
 import random
 import sys
@@ -72,12 +71,6 @@ from vox_tracer.scoring import (
     score_combined,
 )
 
-# Mac/Windows spawn multiprocessing re-imports the script in each worker, which
-# recurses into pool creation before argparse has run.  Force fork on non-Windows
-# (Linux HPC already uses fork; Windows can't fork so --workers 1 is required there).
-if sys.platform != "win32":
-    multiprocessing.set_start_method("fork", force=True)
-
 parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
 parser.add_argument("spec_dir")
 parser.add_argument("das_dir",       help="dir with das_yolo coco_ch_<ch>.json (YOLO boxes for visualization)")
@@ -104,23 +97,6 @@ parser.add_argument("--all",              action="store_true",
 parser.add_argument("--workers",          type=int,   default=4)
 parser.add_argument("--viz-session",      action="store_true",
                     help="write full-session strip (raw | sato+exemplar | pred) for each recording")
-args = parser.parse_args()
-args.all = args.all or not any(Path(args.pred_dir).glob("coco_ch_*.json"))
-if sys.platform == "win32" and args.workers > 1:
-    print("WARNING: Windows does not support fork; clamping --workers to 1.")
-    args.workers = 1
-
-channels      = [int(c) for c in args.channels.split(",")]
-iou_threshold = args.iou_threshold
-random.seed(args.seed)
-
-# The per-chunk `examples` pools exist only to render montage pages, and each one
-# retains the SAM3 polygon segmentation for every chunk of the recording (~12 MB
-# per recording, measured on dryad_gerbil_full).  The parent never frees them, so
-# across a large corpus that is tens of GB of dead weight whenever no montage was
-# asked for -- enough to OOM the process before the CSV is written.  Build them
-# only when they will actually be consumed.
-COLLECT_EXAMPLES = args.montage_samples > 0
 
 CSV_FIELDS = ["session", "channel", "n_gt", "n_pred", "tp", "pred_tp", "fp", "fn",
               "recall", "precision", "f1",
@@ -149,7 +125,7 @@ def _load_coco(path):
 # ── per-recording evaluation ──────────────────────────────────────────────────
 
 def _evaluate_recording(spec_dir, das_dir, recording_dir, pred_dir, channels, iou_threshold, session,
-                        gt_by_rec=None, coverage_by_rec=None):
+                        gt_by_rec=None, coverage_by_rec=None, collect_examples=False):
     """
     Returns
     -------
@@ -283,8 +259,8 @@ def _evaluate_recording(spec_dir, das_dir, recording_dir, pred_dir, channels, io
                  "combined_recall": combined_rec})
 
     # Everything scored is already in `rows`; what follows only tags chunks for
-    # montage rendering, so with COLLECT_EXAMPLES off we are done here.
-    if not COLLECT_EXAMPLES:
+    # montage rendering, so with collect_examples off we are done here.
+    if not collect_examples:
         return rows, examples
 
     # ── Per-channel chunk tagging for montage rendering (uses combined match) ──
@@ -410,7 +386,7 @@ def _write_montage(examples, n, out_dir, prefix, cols, label_strip):
     columns = [c for c in (_render_column(ex) for ex in sampled) if c is not None]
     if columns:
         save_pages(columns, out_dir, prefix=prefix, cols_per_page=cols, label_strip=label_strip)
-        print(f"  wrote {len(columns)} {prefix} examples → {out_dir}")
+        print(f"  wrote {len(columns)} {prefix} examples -> {out_dir}")
 
 
 def _discover(base):
@@ -429,116 +405,149 @@ def _discover(base):
         yield leaf.relative_to(base), leaf
 
 
+_SHARED = {}  # run-wide _evaluate_recording kwargs, set in every process by _init_shared
+
+
+def _init_shared(shared):
+    _SHARED.update(shared)
+
+
+def _worker(t):
+    spec, das, recording, pred, session = t
+    return _evaluate_recording(spec, das, recording, pred, session=session, **_SHARED)
+
+
 # ── main ─────────────────────────────────────────────────────────────────────
 
-out_dir = Path(args.out_dir)
-out_dir.mkdir(parents=True, exist_ok=True)
+def main():
+    args = parser.parse_args()
+    args.all = args.all or not any(Path(args.pred_dir).glob("coco_ch_*.json"))
 
-# GT source switch: --gt-csv → global detections CSV; otherwise per-recording CSVs.
-gt_by_rec, coverage_by_rec = _load_gt_map(args.gt_csv) if args.gt_csv else (None, None)
-if gt_by_rec is not None:
-    n_vox = sum(len(v) for v in gt_by_rec.values())
-    print(f"GT: {n_vox} vocalizations across {len(gt_by_rec)} recordings; "
-          f"{len(coverage_by_rec)} recordings with labeled coverage (FP-evaluable) "
-          f"from {args.gt_csv}")
+    channels      = [int(c) for c in args.channels.split(",")]
+    iou_threshold = args.iou_threshold
+    random.seed(args.seed)
 
-all_rows     = []
-all_examples = {"tp": [], "fp": [], "fn": []}
+    # The per-chunk `examples` pools exist only to render montage pages, and each one
+    # retains the SAM3 polygon segmentation for every chunk of the recording (~12 MB
+    # per recording, measured on dryad_gerbil_full).  The parent never frees them, so
+    # across a large corpus that is tens of GB of dead weight whenever no montage was
+    # asked for -- enough to OOM the process before the CSV is written.  Build them
+    # only when they will actually be consumed.
+    collect_examples = args.montage_samples > 0
 
-if not args.all:
-    session = f"{Path(args.spec_dir).parent.name}/{Path(args.spec_dir).name}"
-    rows, examples = _evaluate_recording(
-        args.spec_dir, args.das_dir, args.recording_dir, args.pred_dir,
-        channels, iou_threshold, session, gt_by_rec, coverage_by_rec,
-    )
-    all_rows.extend(rows)
-    for k in all_examples:
-        all_examples[k].extend(examples[k])
+    out_dir = Path(args.out_dir)
+    out_dir.mkdir(parents=True, exist_ok=True)
 
-else:
-    spec_base      = Path(args.spec_dir)
-    das_base       = Path(args.das_dir)
-    recording_base = Path(args.recording_dir)
-    pred_base      = Path(args.pred_dir)
+    # GT source switch: --gt-csv → global detections CSV; otherwise per-recording CSVs.
+    gt_by_rec, coverage_by_rec = _load_gt_map(args.gt_csv) if args.gt_csv else (None, None)
+    if gt_by_rec is not None:
+        n_vox = sum(len(v) for v in gt_by_rec.values())
+        print(f"GT: {n_vox} vocalizations across {len(gt_by_rec)} recordings; "
+              f"{len(coverage_by_rec)} recordings with labeled coverage (FP-evaluable) "
+              f"from {args.gt_csv}")
 
-    tasks = [
-        (str(idx_dir), str(das_base / rel), str(recording_base / rel), str(pred_base / rel), str(rel))
-        for rel, idx_dir in _discover(spec_base)
-    ]
+    all_rows     = []
+    all_examples = {"tp": [], "fp": [], "fn": []}
 
-    def _worker(t):
-        spec, das, recording, pred, session = t
-        return _evaluate_recording(spec, das, recording, pred, channels, iou_threshold, session,
-                                   gt_by_rec, coverage_by_rec)
-
-    if args.workers == 1:
-        results = []
-        for t in tqdm(tasks, desc="evaluating", unit="rec"):
-            try:
-                results.append(_worker(t))
-            except Exception as e:
-                tqdm.write(f"ERROR {t[0]}: {e}")
-    else:
-        results = []
-        with ProcessPoolExecutor(max_workers=args.workers) as pool:
-            futures = {pool.submit(_worker, t): t for t in tasks}
-            for fut in tqdm(as_completed(futures), total=len(futures), desc="evaluating", unit="rec"):
-                try:
-                    results.append(fut.result())
-                except Exception as e:
-                    tqdm.write(f"ERROR {futures[fut][0]}: {e}")
-
-    for rows, examples in results:
+    if not args.all:
+        session = f"{Path(args.spec_dir).parent.name}/{Path(args.spec_dir).name}"
+        rows, examples = _evaluate_recording(
+            args.spec_dir, args.das_dir, args.recording_dir, args.pred_dir,
+            channels, iou_threshold, session, gt_by_rec, coverage_by_rec, collect_examples,
+        )
         all_rows.extend(rows)
         for k in all_examples:
             all_examples[k].extend(examples[k])
 
-# --- aggregate summary ---
-all_tp      = sum(r["tp"] for r in all_rows)        # GT events detected (recall numerator)
-all_pred_tp = sum(r["pred_tp"] for r in all_rows)   # correct predictions (precision numerator)
-all_fp      = sum(r["fp"] for r in all_rows)
-all_fn      = sum(r["fn"] for r in all_rows)
-p  = all_pred_tp / (all_pred_tp + all_fp) if (all_pred_tp + all_fp) > 0 else float("nan")
-r  = all_tp / (all_tp + all_fn) if (all_tp + all_fn) > 0 else float("nan")
-f1 = 2 * p * r / (p + r) if (p + r) > 0 else float("nan")
-print(f"\nOverall ({len(all_rows)} channel-sessions): "
-      f"TP={all_tp} pred_TP={all_pred_tp} FP={all_fp} FN={all_fn} | "
-      f"Recall={r:.3f} Prec={p:.3f} F1={f1:.3f}")
-
-all_ctp = sum(r["combined_tp"] for r in all_rows)
-all_cfn = sum(r["combined_fn"] for r in all_rows)
-all_cn  = sum(r["n_combined"]  for r in all_rows)
-crec = all_ctp / all_cn if all_cn > 0 else float("nan")
-print(f"  Combined({all_cn}): TP={all_ctp} FN={all_cfn} | Recall={crec:.3f}")
-print(f"  TP examples pool: {len(all_examples['tp'])}  "
-      f"FP: {len(all_examples['fp'])}  FN: {len(all_examples['fn'])}")
-
-# --- write CSV ---  (name reflects GT source so gt-csv runs don't overwrite the default)
-csv_name = f"metrics_{Path(args.gt_csv).stem}.csv" if args.gt_csv else "metrics.csv"
-csv_path = out_dir / csv_name
-with open(csv_path, "w", newline="") as f:
-    writer = csv.DictWriter(f, fieldnames=CSV_FIELDS)
-    writer.writeheader()
-    writer.writerows(all_rows)
-print(f"  metrics → {csv_path}")
-
-# --- write montage samples ---
-if args.montage_samples > 0:
-    label_strip = make_label_strip(ROW_LABELS)
-    for outcome in ("tp", "fp", "fn"):
-        pool = all_examples[outcome]
-        if not pool:
-            print(f"  no {outcome} examples to sample")
-            continue
-        _write_montage(pool, args.montage_samples, out_dir / f"samples_{outcome}",
-                       prefix="page", cols=args.cols, label_strip=label_strip)
-
-# --- session strip ---
-if args.viz_session:
-    if not args.all:
-        viz_session_strip(args.spec_dir, args.pred_dir, out_dir / "session_strip", channels)
     else:
-        for rel, idx_dir in _discover(Path(args.spec_dir)):
-            viz_session_strip(str(idx_dir), str(Path(args.pred_dir) / rel),
-                              out_dir / rel / "session_strip", channels)
+        spec_base      = Path(args.spec_dir)
+        das_base       = Path(args.das_dir)
+        recording_base = Path(args.recording_dir)
+        pred_base      = Path(args.pred_dir)
 
+        # session uses '/' on every OS so it matches the --gt-csv keys
+        tasks = [
+            (str(idx_dir), str(das_base / rel), str(recording_base / rel), str(pred_base / rel), rel.as_posix())
+            for rel, idx_dir in _discover(spec_base)
+        ]
+
+        shared = dict(channels=channels, iou_threshold=iou_threshold, gt_by_rec=gt_by_rec,
+                      coverage_by_rec=coverage_by_rec, collect_examples=collect_examples)
+        _init_shared(shared)
+
+        if args.workers == 1:
+            results = []
+            for t in tqdm(tasks, desc="evaluating", unit="rec"):
+                try:
+                    results.append(_worker(t))
+                except Exception as e:
+                    tqdm.write(f"ERROR {t[0]}: {e}")
+        else:
+            results = []
+            with ProcessPoolExecutor(max_workers=args.workers, initializer=_init_shared,
+                                     initargs=(shared,)) as pool:
+                futures = {pool.submit(_worker, t): t for t in tasks}
+                for fut in tqdm(as_completed(futures), total=len(futures), desc="evaluating", unit="rec"):
+                    try:
+                        results.append(fut.result())
+                    except Exception as e:
+                        tqdm.write(f"ERROR {futures[fut][0]}: {e}")
+
+        for rows, examples in results:
+            all_rows.extend(rows)
+            for k in all_examples:
+                all_examples[k].extend(examples[k])
+
+    # --- aggregate summary ---
+    all_tp      = sum(r["tp"] for r in all_rows)        # GT events detected (recall numerator)
+    all_pred_tp = sum(r["pred_tp"] for r in all_rows)   # correct predictions (precision numerator)
+    all_fp      = sum(r["fp"] for r in all_rows)
+    all_fn      = sum(r["fn"] for r in all_rows)
+    p  = all_pred_tp / (all_pred_tp + all_fp) if (all_pred_tp + all_fp) > 0 else float("nan")
+    r  = all_tp / (all_tp + all_fn) if (all_tp + all_fn) > 0 else float("nan")
+    f1 = 2 * p * r / (p + r) if (p + r) > 0 else float("nan")
+    print(f"\nOverall ({len(all_rows)} channel-sessions): "
+          f"TP={all_tp} pred_TP={all_pred_tp} FP={all_fp} FN={all_fn} | "
+          f"Recall={r:.3f} Prec={p:.3f} F1={f1:.3f}")
+
+    all_ctp = sum(r["combined_tp"] for r in all_rows)
+    all_cfn = sum(r["combined_fn"] for r in all_rows)
+    all_cn  = sum(r["n_combined"]  for r in all_rows)
+    crec = all_ctp / all_cn if all_cn > 0 else float("nan")
+    print(f"  Combined({all_cn}): TP={all_ctp} FN={all_cfn} | Recall={crec:.3f}")
+    print(f"  TP examples pool: {len(all_examples['tp'])}  "
+          f"FP: {len(all_examples['fp'])}  FN: {len(all_examples['fn'])}")
+
+    # --- write CSV ---  (name reflects GT source so gt-csv runs don't overwrite the default)
+    csv_name = f"metrics_{Path(args.gt_csv).stem}.csv" if args.gt_csv else "metrics.csv"
+    csv_path = out_dir / csv_name
+    with open(csv_path, "w", newline="") as f:
+        writer = csv.DictWriter(f, fieldnames=CSV_FIELDS)
+        writer.writeheader()
+        writer.writerows(all_rows)
+    print(f"  metrics -> {csv_path}")
+
+    # --- write montage samples ---
+    if args.montage_samples > 0:
+        label_strip = make_label_strip(ROW_LABELS)
+        for outcome in ("tp", "fp", "fn"):
+            pool = all_examples[outcome]
+            if not pool:
+                print(f"  no {outcome} examples to sample")
+                continue
+            _write_montage(pool, args.montage_samples, out_dir / f"samples_{outcome}",
+                           prefix="page", cols=args.cols, label_strip=label_strip)
+
+    # --- session strip ---
+    if args.viz_session:
+        if not args.all:
+            viz_session_strip(args.spec_dir, args.pred_dir, out_dir / "session_strip", channels)
+        else:
+            for rel, idx_dir in _discover(Path(args.spec_dir)):
+                viz_session_strip(str(idx_dir), str(Path(args.pred_dir) / rel),
+                                  out_dir / rel / "session_strip", channels)
+
+
+# Workers re-import this file on Windows/macOS (spawn), so nothing may run at import time.
+if __name__ == "__main__":
+    main()

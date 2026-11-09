@@ -26,7 +26,6 @@ All recordings in the dataset (parallel):
         --channels 0 --prefix mic --lo -95 --hi -57
 """
 import argparse
-import multiprocessing
 import sys
 import time
 from concurrent.futures import ProcessPoolExecutor, as_completed
@@ -34,10 +33,6 @@ from glob import glob
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
-
-# Force fork on non-Windows so Mac workers don't re-import this script.
-if sys.platform != "win32":
-    multiprocessing.set_start_method("fork", force=True)
 
 from vox_tracer.paths import discover_channels, discover_recordings
 from vox_tracer.spec import calibrate_db_range, load_channel_audio, write_recording_spectrogram_h5, SPEC_LO, SPEC_HI
@@ -60,24 +55,11 @@ parser.add_argument("--lo", type=float, default=None)
 parser.add_argument("--hi", type=float, default=None)
 parser.add_argument("--all",       action="store_true", help="every recording (the default without --recording)")
 parser.add_argument("--workers",   type=int, default=4)
-args = parser.parse_args()
-args.all = args.all or args.recording is None
-if sys.platform == "win32" and args.workers > 1:
-    print("WARNING: Windows does not support fork; clamping --workers to 1.")
-    args.workers = 1
-
-data_base = Path("data") / args.dataset
-if args.channels:
-    channels = [int(c) for c in args.channels.split(",")]
-else:
-    _scope = ([data_base / args.recording] if args.recording else
-              [d for _, d in discover_recordings(data_base, f"{args.prefix}_*.wav")])
-    channels = discover_channels(_scope, args.prefix)
-    print(f"channels (auto): {channels}")
-h5_base   = Path("outputs/spectrograms_h5") / args.dataset
 
 
-def _process_one(rel_recording_dir):
+def _process_one(rel_recording_dir, args, channels):
+    data_base = Path("data") / args.dataset
+    h5_base = Path("outputs/spectrograms_h5") / args.dataset
     recording_dir = data_base / rel_recording_dir
     results = []
     for ch in channels:
@@ -112,23 +94,41 @@ def _process_one(rel_recording_dir):
     return results
 
 
-def _discover_recordings():
+def _discover_recordings(data_base, channels, prefix):
     """Every directory under data_base containing a {prefix}_{ch}_*.wav for any requested channel."""
     seen = set()
     for ch in channels:
-        for wav in sorted(data_base.glob(f"**/{args.prefix}_{ch}_*.wav")):
+        for wav in sorted(data_base.glob(f"**/{prefix}_{ch}_*.wav")):
             seen.add(wav.parent.relative_to(data_base))
     return sorted(seen)
 
 
-if not args.all:
-    if args.recording is None:
-        parser.error("pass --recording <rel path> or --all")
-    _process_one(Path(args.recording))
-else:
-    recordings = _discover_recordings()
-    print(f"Discovered {len(recordings)} recordings under {data_base}")
-    with ProcessPoolExecutor(max_workers=args.workers) as ex:
-        futs = {ex.submit(_process_one, rel): rel for rel in recordings}
-        for fut in as_completed(futs):
-            fut.result()
+def main():
+    args = parser.parse_args()
+    args.all = args.all or args.recording is None
+
+    data_base = Path("data") / args.dataset
+    if args.channels:
+        channels = [int(c) for c in args.channels.split(",")]
+    else:
+        _scope = ([data_base / args.recording] if args.recording else
+                  [d for _, d in discover_recordings(data_base, f"{args.prefix}_*.wav")])
+        channels = discover_channels(_scope, args.prefix)
+        print(f"channels (auto): {channels}")
+
+    if not args.all:
+        if args.recording is None:
+            parser.error("pass --recording <rel path> or --all")
+        _process_one(Path(args.recording), args, channels)
+    else:
+        recordings = _discover_recordings(data_base, channels, args.prefix)
+        print(f"Discovered {len(recordings)} recordings under {data_base}")
+        with ProcessPoolExecutor(max_workers=args.workers) as ex:
+            futs = {ex.submit(_process_one, rel, args, channels): rel for rel in recordings}
+            for fut in as_completed(futs):
+                fut.result()
+
+
+# Workers re-import this file on Windows/macOS (spawn), so nothing may run at import time.
+if __name__ == "__main__":
+    main()

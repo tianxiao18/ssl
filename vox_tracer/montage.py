@@ -142,7 +142,7 @@ def viz_session_strip(spec_dir, pred_dir, out_dir, channels=None, cols=10,
 
         save_pages(columns, out_dir / f"ch_{ch}", prefix="page",
                    cols_per_page=cols, label_strip=make_label_strip(["raw", "ridge", "pred"]))
-        print(f"  session strip ch {ch}: {len(columns)} chunks → {out_dir}/ch_{ch}")
+        print(f"  session strip ch {ch}: {len(columns)} chunks -> {out_dir}/ch_{ch}")
 
 
 def save_pages(columns, out_dir, prefix="page", cols_per_page=10, label_strip=None):
