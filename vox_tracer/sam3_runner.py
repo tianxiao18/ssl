@@ -11,6 +11,7 @@ from skimage.filters import sato
 from vox_tracer.coco import image_entry, make_coco, mask_to_polygons, poly_annotation, save_coco_per_channel
 from vox_tracer.paths import recording_dir_from_spec_dir
 from vox_tracer.ridge import compute_seg_mask, detection_spectral_features, passes_mask_filters
+from vox_tracer.sam3_compat import allow_sam3_without_triton
 from vox_tracer.spec import group_specs_by_channel, load_channel_audio, read_h5_window
 from vox_tracer.spec import h5_windows as _h5_windows
 
@@ -90,6 +91,7 @@ def build_processor(checkpoint=None, score_threshold=0.5):
     build the processor once and reuse it across runs.
     """
     from pathlib import Path as _Path
+    allow_sam3_without_triton()
     from sam3.model_builder import build_sam3_image_model
     from sam3.model.sam3_image_processor import Sam3Processor
 

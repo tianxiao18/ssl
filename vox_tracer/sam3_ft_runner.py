@@ -7,6 +7,7 @@ import torch
 from PIL import Image
 
 from vox_tracer.coco import image_entry, make_coco, mask_to_polygons, save_coco_per_channel
+from vox_tracer.sam3_compat import allow_sam3_without_triton
 from vox_tracer.spec import WindowReader, spec_windows_by_channel, window_fname
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -45,6 +46,7 @@ def load_model(ckpt, mask_mode, threshold, base=BASE):
     key = (str(ckpt), mask_mode, threshold, str(base))
     if key in _MODELS:
         return _MODELS[key]
+    allow_sam3_without_triton()
     from sam3.model.sam3_image_processor import Sam3Processor
     from sam3.model_builder import build_sam3_image_model
 
