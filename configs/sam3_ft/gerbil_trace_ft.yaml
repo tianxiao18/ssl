@@ -148,6 +148,9 @@ trainer:
 
   loss:
     all: ${gerbil.loss}
+    gerbil:  # val batches (collate_fn_val dict_key); same loss as train, so val loss is logged
+      _target_: vox_tracer.sam3_ft.SafeLoss
+      loss: ${gerbil.loss}
     default:
       _target_: sam3.train.loss.sam3_loss.DummyLoss
 
