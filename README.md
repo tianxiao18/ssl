@@ -118,6 +118,19 @@ per-recording std error bars).
 
 ---
 
+## Fine-tuning SAM3
+
+Linux with a CUDA GPU (SAM3's training code needs Triton); on the FI cluster use `--constraint=h100|a100-80gb`.
+
+1. **Dataset:** 1 s spectrogram windows with COCO boxes in `<data_root>/train/` and `<data_root>/val/`; the
+   category name (`trace`) is the text prompt. For gerbil_ssl: `scripts/dataset_prep/build_sam3_ft_dataset.py`.
+2. **Config:** `configs/sam3_ft/gerbil_trace_ft.yaml` (box-only) or `gerbil_trace_seg_ft.yaml` (also the mask
+   head). Copy one and set `paths.repo`, `paths.data_root` and `paths.experiment_log_dir`.
+3. **Train** in a GPU job: `python scripts/segmentation/train_sam3_ft.py -c <config name> --use-cluster 0 --num-gpus 1`.
+   The model is `<experiment_log_dir>/checkpoints/best.pt`.
+
+---
+
 ## Evaluation GUI
 
 Efficient benchmarking/labeling of candidate detections pooled from several detectors, used to
