@@ -1,10 +1,63 @@
 """SAM3 fine-tuning helpers (referenced from configs/sam3_ft/*.yaml)."""
+import logging
+
 import torch
 from torch import nn
 
 from sam3.model_builder import build_sam3_image_model
 
 FROZEN = ("backbone.vision_backbone.trunk.", "backbone.language_backbone.")
+
+
+def _patch_focal_loss():
+    """Send gamma < 1 focal losses (the presence loss, gamma 0) through sam3's PyTorch branch.
+
+    sam3's Triton backward computes pow(1 - p_t, gamma - 1) * (1 - p_t), which is inf * 0 = NaN once
+    |logit| > ~17 makes 1 - p_t round to 0.
+    """
+    from sam3.train.loss import loss_fns
+
+    orig = loss_fns.sigmoid_focal_loss
+    if getattr(orig, "nan_safe", False):
+        return
+
+    def sigmoid_focal_loss(inputs, targets, num_boxes, alpha=0.25, gamma=2, loss_on_multimask=False, reduce=True,
+                           triton=True):
+        return orig(inputs, targets, num_boxes, alpha, gamma, loss_on_multimask, reduce, triton and gamma >= 1)
+
+    sigmoid_focal_loss.nan_safe = True
+    loss_fns.sigmoid_focal_loss = sigmoid_focal_loss
+
+
+class FixedScaler(torch.amp.GradScaler):
+    """GradScaler held at scale 1 (bf16 needs no loss scaling) that still skips steps with non-finite grads.
+
+    The stock scaler halves on every skipped step; at 2**-128, 1/scale overflows to inf, the bad step is no
+    longer caught and the weights go NaN.
+    """
+
+    def __init__(self, device="cuda"):
+        super().__init__(device, init_scale=1.0)
+        self.skipped = 0
+
+    def update(self, new_scale=None):
+        if self._enabled and any(bool(v.item()) for s in self._per_optimizer_states.values()
+                                 for v in s["found_inf_per_device"].values()):
+            self.skipped += 1
+            logging.warning(f"non-finite grads, optimizer step skipped ({self.skipped} so far)")
+        super().update(1.0)
+
+    def load_state_dict(self, state_dict):
+        super().load_state_dict({**state_dict, "scale": 1.0})
+
+
+def nan_fix(trainer):
+    """Both fixes on a sam3 Trainer whose components are set up."""
+    _patch_focal_loss()
+    amp = trainer.optim_conf.amp if trainer.optim_conf else None
+    if amp is not None and amp.enabled and amp.amp_dtype == "bfloat16":
+        trainer.scaler = FixedScaler(trainer.device)
+    logging.info(f"NaN fix: focal loss patched, scaler {type(trainer.scaler).__name__}")
 
 
 def _freeze(module):
@@ -76,7 +129,8 @@ def best_val_trainer(max_nan_skips=50, **kw):
     """sam3 Trainer that also
     - saves checkpoints/best.pt (+ best.json) whenever val bbox AP improves,
     - keeps each epoch's val predictions as dumps/val/epoch_<N>.json (sam3 overwrites one file),
-    - skips a train batch with a non-finite loss instead of stopping (raises after max_nan_skips in a row).
+    - skips a train batch with a non-finite loss instead of stopping (raises after max_nan_skips in a row),
+    - applies nan_fix (the gold-run NaN: presence focal loss backward + bf16 loss-scale collapse).
     """
     import json
     import os
@@ -90,6 +144,10 @@ def best_val_trainer(max_nan_skips=50, **kw):
         best_ap = -1.0
         nan_run = 0
         nan_total = 0
+
+        def _setup_components(self):
+            super()._setup_components()
+            nan_fix(self)
 
         def _run_step(self, batch, phase, loss_mts, extra_loss_mts, raise_on_error=True):
             if getattr(self, "_step_epoch", None) != self.epoch:
